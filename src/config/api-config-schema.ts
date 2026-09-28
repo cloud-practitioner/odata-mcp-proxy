@@ -13,7 +13,7 @@ import { z } from 'zod';
 import type { ApiConfig } from './index.js';
 
 /** HTTP methods an `update` operation may be configured to send. */
-export const UPDATE_METHODS = ['PATCH', 'PUT', 'MERGE'] as const;
+export const UPDATE_METHODS = ['PATCH', 'PUT'] as const;
 export type UpdateMethod = (typeof UPDATE_METHODS)[number];
 
 const nonEmpty = z.string().min(1);
@@ -44,8 +44,8 @@ const keyPropertySchema = z.object({
 
 const navigationPropertySchema = z.object({
   name: nonEmpty,
-  description: z.string(),
-  isCollection: z.boolean(),
+  description: z.string().optional(),
+  isCollection: z.boolean().optional(),
 }).strict();
 
 const entitySetSchema = z.object({
@@ -70,7 +70,7 @@ const entitySetSchema = z.object({
 const apiDefinitionSchema = z.object({
   name: nonEmpty,
   destination: nonEmpty,
-  pathPrefix: z.string(),
+  pathPrefix: z.string().optional(),
   csrfProtected: z.boolean().optional(),
   entitySets: z.array(entitySetSchema),
 }).strict();
@@ -128,7 +128,7 @@ export const apiConfigSchema = z.object({
   server: z.object({
     name: nonEmpty,
     version: z.string(),
-    description: z.string(),
+    description: z.string().optional(),
   }).strict(),
   apis: z.array(apiDefinitionSchema),
   ui: z.array(uiViewSchema).optional(),

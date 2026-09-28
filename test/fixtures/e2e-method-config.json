@@ -6,7 +6,7 @@
   },
   "discovery": {
     "mode": "hybrid",
-    "alwaysRegister": ["IntegrationFlowConfigurations", "IntegrationPackages", "MessageStoreEntries"]
+    "alwaysRegister": ["IntegrationFlowConfigurations", "IntegrationPackages"]
   },
   "apis": [
     {
@@ -37,13 +37,6 @@
           "category": "integration-content",
           "keys": [{ "name": "Id", "type": "string" }],
           "operations": { "list": false, "get": false, "create": false, "update": true, "delete": false }
-        },
-        {
-          "entitySet": "MessageStoreEntries",
-          "description": "message store entries",
-          "category": "message-stores",
-          "keys": [{ "name": "Id", "type": "string" }],
-          "operations": { "update": { "enabled": true, "method": "MERGE" } }
         }
       ]
     }

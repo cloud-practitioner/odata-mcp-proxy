@@ -187,11 +187,11 @@ Each entry in `entitySets` supports:
 | `operations` | yes | `list`, `get`, `create`, `update`, `delete`. Each is `true`, `false`, or `{ "enabled": bool, "requiredScope": "..." }`. An omitted operation is disabled. |
 | `filterableProperties` | no | Property names hinted as `$filter` candidates. |
 | `selectableProperties` | no | Property names hinted as `$select` candidates. |
-| `navigationProperties` | no | `[{ "name": "...", "description": "...", "isCollection": bool }]`, each registered as `<entitySet>_<name>_list`. |
+| `navigationProperties` | no | `[{ "name": "...", "description": "...", "isCollection": bool }]` (`description` and `isCollection` optional), each registered as `<entitySet>_<name>_list`. |
 
 `requiredScope` restricts the operation to callers whose JWT carries that scope (either the bare name or the XSUAA `appname.scope` form).
 
-The `update` operation also accepts `method`: `"PATCH"` (default), `"PUT"` or `"MERGE"`. Use `PUT` where the API replaces rather than merges, such as Cloud Integration externalized parameters or API Management products:
+The `update` operation also accepts `method`: `"PATCH"` (default) or `"PUT"`. Use `PUT` where the API replaces rather than merges, such as Cloud Integration externalized parameters or API Management products:
 
 ```json
 {

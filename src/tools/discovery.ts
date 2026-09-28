@@ -46,7 +46,7 @@ type OperationName = (typeof OPERATIONS)[number];
  * keys for the operation to exist at all, and whether a key expression is
  * required in `path` when it does.
  *
- * The method is only a default for `update`, which may configure PUT or MERGE
+ * The method is only a default for `update`, which may configure PUT
  * instead (see `methodFor`).
  *
  * The key flags differ for `update`: a keyless collection-level update is

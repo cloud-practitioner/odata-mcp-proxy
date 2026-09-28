@@ -133,8 +133,8 @@ export interface ApiDefinition {
   name: string;
   /** BTP Destination name (or local env var prefix) used to authenticate requests. */
   destination: string;
-  /** OData path prefix, e.g. "/api/v1". */
-  pathPrefix: string;
+  /** OData path prefix (default: "/api/v1"). */
+  pathPrefix?: string;
   /** Entity sets exposed by this API. */
   entitySets: EntitySetDefinition[];
   /**
@@ -290,7 +290,7 @@ export interface ApiConfig {
   server: {
     name: string;
     version: string;
-    description: string;
+    description?: string;
   };
   /** One entry per backend API. Each has its own destination, path prefix, and entity sets. */
   apis: ApiDefinition[];
@@ -361,7 +361,7 @@ export type OperationDefinition =
  * The update operation additionally chooses its HTTP method (default PATCH).
  * PUT is needed where the API replaces rather than merges, e.g. CPI
  * externalized parameters (`$links/Configurations`) and API Management
- * products; MERGE is the OData V2 partial update some services expect.
+ * products.
  *
  * Example: { enabled: true, requiredScope: "write", method: "PUT" }
  */

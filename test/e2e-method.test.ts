@@ -85,13 +85,13 @@ function serverEnv(apiConfigFile: string): Record<string, string> {
   };
 }
 
-async function withClient(fn: (client: Client) => Promise<void>): Promise<void> {
+async function withClient(fn: (client: Client) => Promise<void>, apiConfigFile = configPath): Promise<void> {
   assert.ok(existsSync(serverEntry), 'dist/index.js missing - run `npm run build` first');
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [serverEntry],
     cwd: rootDir,
-    env: serverEnv(configPath),
+    env: serverEnv(apiConfigFile),
   });
   const client = new Client({ name: 'e2e-method-test', version: '0.0.0' });
   await client.connect(transport);
@@ -179,16 +179,6 @@ test('update without a configured method still sends PATCH', async () => {
   });
 });
 
-test('update configured with method MERGE sends MERGE', async () => {
-  await withClient(async (client) => {
-    const request = await backendRequest(client, 'MessageStoreEntries_update', {
-      path: "('M')",
-      body: { Status: 'x' },
-    });
-    assert.deepEqual(request, { method: 'MERGE', url: "/api/v1/MessageStoreEntries('M')", body: { Status: 'x' } });
-  });
-});
-
 // ─── Startup validation ──────────────────────────────────────────────────────
 
 /** Boot the server against a mutated copy of the fixture and return how it exited. */
@@ -219,7 +209,7 @@ test('an invalid update method fails startup with a clear message', () => {
   assert.notEqual(status, 0);
   assert.ok(stderr.includes(`API config validation failed for ${file}`), stderr);
   assert.ok(
-    stderr.includes("apis[0].entitySets[0].operations.update.method: Invalid enum value. Expected 'PATCH' | 'PUT' | 'MERGE', received 'POST'"),
+    stderr.includes("apis[0].entitySets[0].operations.update.method: Invalid enum value. Expected 'PATCH' | 'PUT', received 'POST'"),
     stderr,
   );
 });
@@ -233,4 +223,29 @@ test('a misspelled operations key fails startup with a clear message', () => {
     stderr.includes("apis[0].entitySets[0].operations.update: Unrecognized key(s) in object: 'requiredscope'"),
     stderr,
   );
+});
+
+test('a config omitting defaulted and unread fields still starts and uses the default path prefix', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'odata-mcp-proxy-method-'));
+  const file = join(dir, 'api-config.json');
+  try {
+    const config = JSON.parse(readFileSync(configPath, 'utf8'));
+    delete config.server.description;
+    delete config.apis[0].pathPrefix;
+    config.apis[0].entitySets[1].navigationProperties = [{ name: 'IntegrationDesigntimeArtifacts' }];
+    writeFileSync(file, JSON.stringify(config));
+
+    await withClient(async (client) => {
+      const { tools } = await client.listTools();
+      assert.ok(tools.some((t) => t.name === 'IntegrationPackages_IntegrationDesigntimeArtifacts_list'));
+
+      const request = await backendRequest(client, 'IntegrationFlowConfigurations_update', {
+        path: "(Id='F',Version='active')/$links/Configurations('k')",
+        body: { ParameterValue: 'v2' },
+      });
+      assert.deepEqual(request, { method: 'PUT', url: `/api/v1/${CONFIGURATION}`, body: { ParameterValue: 'v2' } });
+    }, file);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

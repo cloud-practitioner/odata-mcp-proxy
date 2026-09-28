@@ -47,8 +47,8 @@ function errorFor(raw: unknown): string {
 
 const OPS = 'apis[0].entitySets[0].operations';
 
-test('update accepts PATCH, PUT and MERGE, and resolves the method', () => {
-  for (const method of ['PATCH', 'PUT', 'MERGE'] as const) {
+test('update accepts PATCH and PUT, and resolves the method', () => {
+  for (const method of ['PATCH', 'PUT'] as const) {
     const config = parseApiConfig(withOperations({ update: { enabled: true, requiredScope: 'write', method } }), 'cfg.json');
     const resolved = resolveOperation(config.apis[0].entitySets[0].operations.update);
     assert.deepEqual(resolved, { enabled: true, requiredScope: 'write', method });
@@ -63,8 +63,29 @@ test('an update without a method resolves to no method (callers default to PATCH
 test('an unknown update method is rejected', () => {
   assert.match(
     errorFor(withOperations({ update: { enabled: true, method: 'POST' } })),
-    /apis\[0\]\.entitySets\[0\]\.operations\.update\.method: Invalid enum value\. Expected 'PATCH' \| 'PUT' \| 'MERGE', received 'POST'/,
+    /apis\[0\]\.entitySets\[0\]\.operations\.update\.method: Invalid enum value\. Expected 'PATCH' \| 'PUT', received 'POST'/,
   );
+});
+
+test('fields with a runtime default or no reader may be omitted', () => {
+  const config = parseApiConfig({
+    server: { name: 's', version: '1' },
+    apis: [{
+      name: 'a',
+      destination: 'DEST',
+      entitySets: [{
+        entitySet: 'E',
+        description: 'e',
+        category: 'c',
+        keys: [{ name: 'Id', type: 'string' }],
+        operations: { list: true },
+        navigationProperties: [{ name: 'Items' }],
+      }],
+    }],
+  }, 'cfg.json');
+  assert.equal(config.server.description, undefined);
+  assert.equal(config.apis[0].pathPrefix, undefined);
+  assert.deepEqual(config.apis[0].entitySets[0].navigationProperties, [{ name: 'Items' }]);
 });
 
 test('method is only accepted on update', () => {

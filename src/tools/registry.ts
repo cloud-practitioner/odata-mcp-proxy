@@ -25,8 +25,8 @@ export interface KeyProperty {
  */
 export interface NavigationProperty {
   name: string;
-  description: string;
-  isCollection: boolean;
+  description?: string;
+  isCollection?: boolean;
 }
 
 /**
@@ -286,7 +286,7 @@ export function registerEntityTools(
     for (const nav of navigationProperties) {
       server.tool(
         `${entitySet}_${nav.name}_list`,
-        `Get ${nav.description} for a specific ${description} (GET). ` +
+        `Get ${nav.description ?? nav.name} for a specific ${description} (GET). ` +
           `Provide the parent entity key(s) in path, then /${nav.name} is appended automatically.${keyHint}`,
         genericToolSchema,
         async (args, extra) => handleToolCall(client, 'GET', urlPath, nav.name, args, extra.authInfo?.token),
