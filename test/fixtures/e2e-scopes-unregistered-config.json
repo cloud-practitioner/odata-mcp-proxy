@@ -1,0 +1,42 @@
+{
+  "server": {
+    "name": "scopes-unregistered-e2e",
+    "version": "0.0.1",
+    "description": "Stub config whose only scopes sit on a disabled operation or on an entity set outside the enabled categories"
+  },
+  "apis": [
+    {
+      "name": "cpi",
+      "destination": "E2E_SCOPES_DEST",
+      "pathPrefix": "/api/v1",
+      "entitySets": [
+        {
+          "entitySet": "IntegrationPackages",
+          "description": "Integration packages",
+          "category": "integration-content",
+          "keys": [{ "name": "Id", "type": "string" }],
+          "operations": {
+            "list": { "enabled": true, "requiredScope": "read" },
+            "get": { "enabled": true, "requiredScope": "read" },
+            "create": false,
+            "update": false,
+            "delete": false
+          }
+        },
+        {
+          "entitySet": "MessageProcessingLogs",
+          "description": "Message processing logs",
+          "category": "message-processing-logs",
+          "keys": [{ "name": "MessageGuid", "type": "string" }],
+          "operations": {
+            "list": true,
+            "get": true,
+            "create": false,
+            "update": false,
+            "delete": { "enabled": false, "requiredScope": "admin" }
+          }
+        }
+      ]
+    }
+  ]
+}

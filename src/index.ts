@@ -11,7 +11,7 @@ import { randomUUID } from 'node:crypto';
 import { realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { config, apiConfig, apiConfigDir, type Config, type ApiConfig, type ApiDefinition } from './config/index.js';
+import { config, apiConfig, apiConfigDir, resolveOperation, type Config, type ApiConfig, type ApiDefinition } from './config/index.js';
 import { initLogger, logger } from './utils/logger.js';
 import { resolveDestination } from './client/destination-service.js';
 import { ODataClient } from './client/odata-client.js';
@@ -181,6 +181,35 @@ export async function start(options: StartOptions = {}): Promise<void> {
 
   const extrasContext: ExtrasContext = { clientsByApi, apiConfig, config };
 
+  // ── Scope policy ────────────────────────────────────────────────────────────
+  //
+  // `requiredScope` is checked against the caller's JWT, which only exists
+  // when the transport authenticates callers: HTTP with XSUAA bound, where
+  // requireAuth() rejects requests without a valid bearer token. Over stdio,
+  // or HTTP without XSUAA, there is no caller token, so enforcing would reject
+  // every scoped call; backend access is governed by the destination
+  // credentials instead.
+  const xsuaa = config.mcpTransport === 'http' ? new XsuaaAuth() : undefined;
+  const enforceScopes = xsuaa?.isConfigured() ?? false;
+
+  const allCategories =
+    config.enabledApiCategories.length === 1 && config.enabledApiCategories[0] === 'all';
+  const declaresScopes = allEntitySets
+    .filter((def) => allCategories || config.enabledApiCategories.includes(def.category))
+    .some((def) =>
+      Object.values(def.operations).some((op) => {
+        const resolved = resolveOperation(op);
+        return resolved.enabled && Boolean(resolved.requiredScope);
+      }),
+    );
+  if (declaresScopes && !enforceScopes) {
+    const reason = config.mcpTransport === 'stdio' ? 'stdio transport' : 'XSUAA not bound';
+    logger.warn(
+      `requiredScope is not enforced: no XSUAA-authenticated caller (${reason}). ` +
+      'Backend access is governed by the destination credentials.',
+    );
+  }
+
   // ── 3. Session factory ──────────────────────────────────────────────────────
   //
   // Each HTTP session (or the single stdio session) gets its own McpServer
@@ -200,6 +229,7 @@ export async function start(options: StartOptions = {}): Promise<void> {
         apiDef.entitySets,
         config.enabledApiCategories,
         discoverySetup?.pinnedSet,
+        { enforceScopes },
       );
     }
 
@@ -208,6 +238,7 @@ export async function start(options: StartOptions = {}): Promise<void> {
         discovery,
         index: discoverySetup.index,
         pinned: discoverySetup.pinned,
+        enforceScopes,
       });
     }
 
@@ -233,8 +264,7 @@ export async function start(options: StartOptions = {}): Promise<void> {
       './server/http.js'
     );
 
-    const auth = new XsuaaAuth();
-    const app = createHttpServer(config.port, auth);
+    const app = createHttpServer(config.port, xsuaa!);
 
     // Map of active sessions (sessionId -> transport + server) for stateful mode.
     type Session = {

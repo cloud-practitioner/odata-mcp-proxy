@@ -35,12 +35,20 @@ function getLogLevel(): string {
   return process.env.LOG_LEVEL ?? 'info';
 }
 
+/**
+ * Over stdio, stdout carries the MCP JSON-RPC stream, so every log level must
+ * go to stderr; a log line on stdout corrupts the protocol.
+ */
+function stderrLevels(): string[] {
+  return process.env.MCP_TRANSPORT === 'stdio' ? Object.keys(winston.config.npm.levels) : [];
+}
+
 function createLogger(level?: string): winston.Logger {
   return winston.createLogger({
     level: level ?? getLogLevel(),
     format: isProduction() ? prodFormat : devFormat,
     transports: [
-      new winston.transports.Console(),
+      new winston.transports.Console({ stderrLevels: stderrLevels() }),
     ],
   });
 }

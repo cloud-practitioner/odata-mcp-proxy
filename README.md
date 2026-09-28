@@ -430,7 +430,7 @@ Two levels rather than the more common three-tool `discover → describe → exe
 
 An empty or unmatched query returns the whole catalog rather than nothing, with `matched: false` and a `note` saying so — a dead end is worse for the model than a list it can narrow. Search is keyword-based with field weighting (exact name ≫ name prefix ≫ category ≫ description), and splits camelCase so `sub accounts` finds `Subaccounts`. Embeddings were deliberately not used: it would pull a model dependency into a package that has none.
 
-**`execute_operation(api, entitySet, operation, path?, navProperty?, body?, headers?)`** — routes to the same `ODataClient`, method and path construction as the generated tools, including `requiredScope` enforcement (the check is shared, not reimplemented).
+**`execute_operation(api, entitySet, operation, path?, navProperty?, body?, headers?)`** — routes to the same `ODataClient`, method and path construction as the generated tools, including the `requiredScope` policy (the check is shared, not reimplemented; see [Operation Scopes](#operation-scopes)).
 
 Because a generic executor has no per-tool schema to reject bad input, it validates routing itself and every failure names the valid options:
 
@@ -528,6 +528,24 @@ Use `ENABLED_API_CATEGORIES` to restrict which tool groups are registered:
 | `partner-directory` | Partners, string/binary parameters, alternative partners, authorized users |
 
 Set to `all` (the default) to enable every category.
+
+### Operation Scopes
+
+Each entry in an entity set's `operations` is either a boolean or an object with an optional `requiredScope`:
+
+```json
+"operations": {
+  "list": { "enabled": true, "requiredScope": "read" },
+  "create": { "enabled": true, "requiredScope": "write" },
+  "delete": { "enabled": true, "requiredScope": "admin" }
+}
+```
+
+`requiredScope` is checked against the caller's JWT, so it is enforced only when the transport authenticates a caller: HTTP with an XSUAA service bound. There, `/mcp` rejects requests without a valid bearer token, and a tool call whose token lacks the scope (as `<xsappname>.<scope>` or the bare name) fails with `Forbidden`.
+
+Over stdio, or HTTP without XSUAA, there is no caller token, so `requiredScope` is not enforced and backend access is governed by the destination's own credentials. The server logs a warning at startup when an enabled operation of a registered entity set declares a scope that will not be enforced.
+
+Programmatic callers of `registerAllTools` / `registerEntityTools` enforce scopes by default; pass `{ enforceScopes: false }` as the scope options to opt out.
 
 ---
 
@@ -648,7 +666,7 @@ MCP_TRANSPORT=http PORT=4004 npm start
 
 ### stdio
 
-Used for local development and direct integration with Claude Desktop. Communication happens over standard input/output streams.
+Used for local development and direct integration with Claude Desktop. Communication happens over standard input/output streams; stdout carries only MCP messages, and all log output goes to stderr.
 
 ```bash
 MCP_TRANSPORT=stdio npm start
