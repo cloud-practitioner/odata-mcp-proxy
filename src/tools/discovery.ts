@@ -21,7 +21,7 @@ import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import type { ODataClient } from '../client/odata-client.js';
-import { resolveOperation, type DiscoveryDefinition } from '../config/index.js';
+import { DEFAULT_UPDATE_METHOD, resolveOperation, type DiscoveryDefinition } from '../config/index.js';
 import {
   formatToolResult,
   formatToolError,
@@ -42,13 +42,16 @@ const OPERATIONS = ['list', 'get', 'create', 'update', 'delete'] as const;
 type OperationName = (typeof OPERATIONS)[number];
 
 /**
- * Per operation: the HTTP method, whether the entity set must define keys for
- * the operation to exist at all, and whether a key expression is required in
- * `path` when it does.
+ * Per operation: the default HTTP method, whether the entity set must define
+ * keys for the operation to exist at all, and whether a key expression is
+ * required in `path` when it does.
  *
- * These differ for `update`: a keyless collection-level PATCH is valid (BTP
- * entitlement assignments work this way), so it is always available, but a
- * keyed entity set still expects the key in the path.
+ * The method is only a default for `update`, which may configure PUT or MERGE
+ * instead (see `methodFor`).
+ *
+ * The key flags differ for `update`: a keyless collection-level update is
+ * valid (BTP entitlement assignments work this way), so it is always
+ * available, but a keyed entity set still expects the key in the path.
  */
 const OPERATION_METHOD: Record<
   OperationName,
@@ -57,9 +60,14 @@ const OPERATION_METHOD: Record<
   list: { method: 'GET', requiresKeyedEntitySet: false, keyedWhenAvailable: false },
   get: { method: 'GET', requiresKeyedEntitySet: true, keyedWhenAvailable: true },
   create: { method: 'POST', requiresKeyedEntitySet: false, keyedWhenAvailable: false },
-  update: { method: 'PATCH', requiresKeyedEntitySet: false, keyedWhenAvailable: true },
+  update: { method: DEFAULT_UPDATE_METHOD, requiresKeyedEntitySet: false, keyedWhenAvailable: true },
   delete: { method: 'DELETE', requiresKeyedEntitySet: true, keyedWhenAvailable: true },
 };
+
+/** The HTTP method this entity set's operation sends, honouring a configured update method. */
+function methodFor(definition: EntitySetDefinition, operation: OperationName): string {
+  return resolveOperation(definition.operations[operation]).method ?? OPERATION_METHOD[operation].method;
+}
 
 /** Whether this operation needs a key expression in `path` for this entity set. */
 function needsKeyInPath(operation: OperationName, keyCount: number): boolean {
@@ -101,7 +109,7 @@ export function buildIndex(
         const resolved = resolveOperation(definition.operations[op]);
         if (!resolved.enabled) return false;
         // get/delete address a single entity, so they need a keyed entity set.
-        // update does not: a collection-level PATCH with a body is valid.
+        // update does not: a collection-level update with a body is valid.
         return !OPERATION_METHOD[op].requiresKeyedEntitySet || definition.keys.length > 0;
       });
       if (available.length === 0) continue;
@@ -229,7 +237,7 @@ function fullEntry(entry: IndexEntry) {
     selectableProperties: definition.selectableProperties,
     operationDetails: entry.available.map((op) => ({
       operation: op,
-      method: OPERATION_METHOD[op].method,
+      method: methodFor(definition, op),
       requiresKeysInPath: needsKeyInPath(op, definition.keys.length),
       requiresBody: op === 'create' || op === 'update',
     })),
@@ -404,7 +412,6 @@ export function registerDiscoveryTools(server: McpServer, options: DiscoveryOpti
         );
       }
 
-      const spec = OPERATION_METHOD[operation];
       if (needsKeyInPath(operation, entry.definition.keys.length) && !args.path) {
         return formatToolError(
           `Operation "${operation}" on ${entry.definition.entitySet} needs a key expression in "path". ` +
@@ -433,7 +440,7 @@ export function registerDiscoveryTools(server: McpServer, options: DiscoveryOpti
 
       try {
         const result = await entry.client.execute(
-          spec.method,
+          methodFor(entry.definition, operation),
           fullPath,
           args.body,
           args.headers,

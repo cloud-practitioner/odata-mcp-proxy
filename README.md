@@ -173,6 +173,39 @@ Create an `api-config.json` in your project root. The CLI automatically picks it
 }
 ```
 
+The config is validated at startup: an unknown or misspelled key, a value of the wrong type, or an unsupported `method` stops the server with a message naming the offending location (e.g. `apis[0].entitySets[3].operations.update.method`).
+
+Each entry in `entitySets` supports:
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `entitySet` | yes | Entity set name, also the tool name prefix (`<entitySet>_list`, `_get`, ...). |
+| `urlPath` | no | URL path segment, when it differs from `entitySet` (default: `entitySet`). |
+| `description` | yes | Human-readable description used in tool descriptions. |
+| `category` | yes | Category for `ENABLED_API_CATEGORIES` filtering. |
+| `keys` | yes | Key properties: `[{ "name": "Id", "type": "string" \| "number" }]`. `get` and `delete` are only registered when keys are defined. |
+| `operations` | yes | `list`, `get`, `create`, `update`, `delete`. Each is `true`, `false`, or `{ "enabled": bool, "requiredScope": "..." }`. An omitted operation is disabled. |
+| `filterableProperties` | no | Property names hinted as `$filter` candidates. |
+| `selectableProperties` | no | Property names hinted as `$select` candidates. |
+| `navigationProperties` | no | `[{ "name": "...", "description": "...", "isCollection": bool }]`, each registered as `<entitySet>_<name>_list`. |
+
+`requiredScope` restricts the operation to callers whose JWT carries that scope (either the bare name or the XSUAA `appname.scope` form).
+
+The `update` operation also accepts `method`: `"PATCH"` (default), `"PUT"` or `"MERGE"`. Use `PUT` where the API replaces rather than merges, such as Cloud Integration externalized parameters or API Management products:
+
+```json
+{
+  "entitySet": "IntegrationFlowConfigurations",
+  "urlPath": "IntegrationDesigntimeArtifacts",
+  "description": "externalized parameters of an integration flow",
+  "category": "integration-content",
+  "keys": [{ "name": "Id", "type": "string" }, { "name": "Version", "type": "string" }],
+  "operations": { "update": { "enabled": true, "requiredScope": "write", "method": "PUT" } }
+}
+```
+
+Calling `IntegrationFlowConfigurations_update` with path `(Id='MyFlow',Version='active')/$links/Configurations('MyParam')` and body `{ "ParameterValue": "new" }` then sends `PUT /api/v1/IntegrationDesigntimeArtifacts(Id='MyFlow',Version='active')/$links/Configurations('MyParam')`. The method appears in the tool description and in `search_operations` results, and `execute_operation` uses it too.
+
 You can also use a custom filename with the `--config` flag:
 
 ```bash

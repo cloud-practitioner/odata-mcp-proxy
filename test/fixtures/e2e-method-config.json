@@ -1,0 +1,51 @@
+{
+  "server": {
+    "name": "method-e2e",
+    "version": "0.0.1",
+    "description": "Stub config for the configurable update method end-to-end test"
+  },
+  "discovery": {
+    "mode": "hybrid",
+    "alwaysRegister": ["IntegrationFlowConfigurations", "IntegrationPackages", "MessageStoreEntries"]
+  },
+  "apis": [
+    {
+      "name": "cpi",
+      "destination": "E2E_METHOD_DEST",
+      "pathPrefix": "/api/v1",
+      "entitySets": [
+        {
+          "entitySet": "IntegrationFlowConfigurations",
+          "urlPath": "IntegrationDesigntimeArtifacts",
+          "description": "externalized parameters of an integration flow",
+          "category": "integration-content",
+          "keys": [
+            { "name": "Id", "type": "string" },
+            { "name": "Version", "type": "string" }
+          ],
+          "operations": {
+            "list": false,
+            "get": false,
+            "create": false,
+            "update": { "enabled": true, "method": "PUT" },
+            "delete": false
+          }
+        },
+        {
+          "entitySet": "IntegrationPackages",
+          "description": "integration packages",
+          "category": "integration-content",
+          "keys": [{ "name": "Id", "type": "string" }],
+          "operations": { "list": false, "get": false, "create": false, "update": true, "delete": false }
+        },
+        {
+          "entitySet": "MessageStoreEntries",
+          "description": "message store entries",
+          "category": "message-stores",
+          "keys": [{ "name": "Id", "type": "string" }],
+          "operations": { "update": { "enabled": true, "method": "MERGE" } }
+        }
+      ]
+    }
+  ]
+}
