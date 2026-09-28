@@ -86,7 +86,7 @@ test('a minimal config omitting optional fields loads with their defaults', () =
   }, 'cfg.json');
   const packageVersion = JSON.parse(readFileSync(join(rootDir, 'package.json'), 'utf8')).version;
   assert.deepEqual(config.server, { name: 's', version: packageVersion });
-  assert.deepEqual(config.apis.map((api) => api.name), ['a', 'apis[1]']);
+  assert.deepEqual(config.apis.map((api) => api.name), ['a', 'api1']);
   assert.equal(config.apis[1].pathPrefix, undefined);
   assert.deepEqual(config.apis[1].entitySets[0], {
     entitySet: 'E',

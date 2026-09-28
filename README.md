@@ -173,7 +173,7 @@ Create an `api-config.json` in your project root. The CLI automatically picks it
 }
 ```
 
-The config is validated at startup: an unknown or misspelled key, a value of the wrong type, or an unsupported `method` stops the server with a message naming the offending location (e.g. `apis[0].entitySets[3].operations.update.method`). Omitted fields fall back to defaults: `server.version` to this package's version, `apis[].name` to `apis[<index>]` and `apis[].pathPrefix` to `/api/v1`.
+The config is validated at startup: an unknown or misspelled key, a value of the wrong type, or an unsupported `method` stops the server with a message naming the offending location (e.g. `apis[0].entitySets[3].operations.update.method`). Omitted fields fall back to defaults: `server.version` to this package's version, `apis[].name` to `api<index>` (e.g. `api0`) and `apis[].pathPrefix` to `/api/v1`.
 
 Each entry in `entitySets` supports:
 

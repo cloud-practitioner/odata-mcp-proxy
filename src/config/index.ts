@@ -129,7 +129,7 @@ export const config: Config = loadConfig();
  * and the entity sets it exposes.
  */
 export interface ApiDefinition {
-  /** Logical name for this API, used for logging and as its `api` label (default: `apis[<index>]`). */
+  /** Logical name for this API, used for logging and as its `api` label (default: `api<index>`, e.g. `api0`). */
   name: string;
   /** BTP Destination name (or local env var prefix) used to authenticate requests. */
   destination: string;

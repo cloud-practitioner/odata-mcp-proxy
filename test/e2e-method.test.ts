@@ -250,13 +250,16 @@ test('a config omitting optional fields still starts, registers its tools and ap
       assert.ok(tools.some((t) => t.name === 'IntegrationPackages_IntegrationDesigntimeArtifacts_list'));
 
       const viaDiscovery = await backendRequest(client, 'execute_operation', {
-        api: 'apis[0]',
+        api: 'api0',
         entitySet: 'IntegrationPackages',
         operation: 'update',
         path: "('P')",
         body: { Name: 'renamed' },
       });
       assert.deepEqual(viaDiscovery, { method: 'PATCH', url: "/api/v1/IntegrationPackages('P')", body: { Name: 'renamed' } });
+
+      const schema = await client.readResource({ uri: 'odata://api0/IntegrationPackages' });
+      assert.equal((JSON.parse(String(schema.contents[0].text)) as { api: string }).api, 'api0');
 
       const request = await backendRequest(client, 'IntegrationFlowConfigurations_update', {
         path: "(Id='F',Version='active')/$links/Configurations('k')",

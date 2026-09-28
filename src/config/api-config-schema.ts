@@ -139,7 +139,7 @@ export const apiConfigSchema = z.object({
     description: z.string().optional(),
   }).strict(),
   apis: z.array(apiDefinitionSchema).transform((apis) =>
-    apis.map((api, i) => ({ ...api, name: api.name ?? `apis[${i}]` })),
+    apis.map((api, i) => ({ ...api, name: api.name ?? `api${i}` })),
   ),
   ui: z.array(uiViewSchema).optional(),
   discovery: discoverySchema.optional(),
