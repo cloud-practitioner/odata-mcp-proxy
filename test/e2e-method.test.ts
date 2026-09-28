@@ -225,19 +225,38 @@ test('a misspelled operations key fails startup with a clear message', () => {
   );
 });
 
-test('a config omitting defaulted and unread fields still starts and uses the default path prefix', async () => {
+test('a config omitting optional fields still starts, registers its tools and applies the defaults', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'odata-mcp-proxy-method-'));
   const file = join(dir, 'api-config.json');
   try {
     const config = JSON.parse(readFileSync(configPath, 'utf8'));
+    delete config.server.version;
     delete config.server.description;
+    delete config.apis[0].name;
     delete config.apis[0].pathPrefix;
+    for (const entity of config.apis[0].entitySets) {
+      delete entity.description;
+      delete entity.category;
+    }
     config.apis[0].entitySets[1].navigationProperties = [{ name: 'IntegrationDesigntimeArtifacts' }];
     writeFileSync(file, JSON.stringify(config));
 
     await withClient(async (client) => {
+      const packageVersion = JSON.parse(readFileSync(join(rootDir, 'package.json'), 'utf8')).version;
+      assert.equal(client.getServerVersion()?.version, packageVersion);
+
       const { tools } = await client.listTools();
+      assert.match(tools.find((t) => t.name === 'IntegrationPackages_update')?.description ?? '', /^Update an existing IntegrationPackages \(PATCH\)/);
       assert.ok(tools.some((t) => t.name === 'IntegrationPackages_IntegrationDesigntimeArtifacts_list'));
+
+      const viaDiscovery = await backendRequest(client, 'execute_operation', {
+        api: 'apis[0]',
+        entitySet: 'IntegrationPackages',
+        operation: 'update',
+        path: "('P')",
+        body: { Name: 'renamed' },
+      });
+      assert.deepEqual(viaDiscovery, { method: 'PATCH', url: "/api/v1/IntegrationPackages('P')", body: { Name: 'renamed' } });
 
       const request = await backendRequest(client, 'IntegrationFlowConfigurations_update', {
         path: "(Id='F',Version='active')/$links/Configurations('k')",

@@ -9,8 +9,12 @@
 // environment or a config file.
 // =============================================================================
 
+import { createRequire } from 'node:module';
 import { z } from 'zod';
 import type { ApiConfig } from './index.js';
+
+/** This package's version, the server version when the config omits one. */
+const PACKAGE_VERSION: string = createRequire(import.meta.url)('../../package.json').version;
 
 /** HTTP methods an `update` operation may be configured to send. */
 export const UPDATE_METHODS = ['PATCH', 'PUT'] as const;
@@ -51,8 +55,8 @@ const navigationPropertySchema = z.object({
 const entitySetSchema = z.object({
   entitySet: nonEmpty,
   urlPath: nonEmpty.optional(),
-  description: z.string(),
-  category: z.string(),
+  description: z.string().optional(),
+  category: z.string().optional(),
   keys: z.array(keyPropertySchema),
   // An omitted operation is disabled, exactly as `false`.
   operations: z.object({
@@ -65,10 +69,14 @@ const entitySetSchema = z.object({
   filterableProperties: z.array(z.string()).optional(),
   selectableProperties: z.array(z.string()).optional(),
   navigationProperties: z.array(navigationPropertySchema).optional(),
-}).strict();
+}).strict().transform((entity) => ({
+  ...entity,
+  description: entity.description ?? entity.entitySet,
+  category: entity.category ?? '',
+}));
 
 const apiDefinitionSchema = z.object({
-  name: nonEmpty,
+  name: nonEmpty.optional(),
   destination: nonEmpty,
   pathPrefix: z.string().optional(),
   csrfProtected: z.boolean().optional(),
@@ -108,7 +116,7 @@ const uiDataSourceSchema = z.object({
 
 const uiViewSchema = z.object({
   tool: nonEmpty,
-  description: z.string(),
+  description: z.string().optional(),
   uri: nonEmpty,
   template: nonEmpty,
   inputs: z.record(uiInputSchema).optional(),
@@ -127,10 +135,12 @@ const discoverySchema = z.object({
 export const apiConfigSchema = z.object({
   server: z.object({
     name: nonEmpty,
-    version: z.string(),
+    version: z.string().default(PACKAGE_VERSION),
     description: z.string().optional(),
   }).strict(),
-  apis: z.array(apiDefinitionSchema),
+  apis: z.array(apiDefinitionSchema).transform((apis) =>
+    apis.map((api, i) => ({ ...api, name: api.name ?? `apis[${i}]` })),
+  ),
   ui: z.array(uiViewSchema).optional(),
   discovery: discoverySchema.optional(),
 }).strict();

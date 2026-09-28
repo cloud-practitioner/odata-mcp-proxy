@@ -48,9 +48,9 @@ export interface EntitySetDefinition {
   entitySet: string;
   /** URL path segment override (defaults to entitySet when omitted) */
   urlPath?: string;
-  /** Human-readable description for LLM */
+  /** Human-readable description for LLM (default: the entity set name) */
   description: string;
-  /** API category for filtering */
+  /** API category for filtering (default: empty, so only enabled when all categories are) */
   category: string;
   /** Key properties for get/update/delete operations */
   keys: KeyProperty[];

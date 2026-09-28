@@ -173,7 +173,7 @@ Create an `api-config.json` in your project root. The CLI automatically picks it
 }
 ```
 
-The config is validated at startup: an unknown or misspelled key, a value of the wrong type, or an unsupported `method` stops the server with a message naming the offending location (e.g. `apis[0].entitySets[3].operations.update.method`).
+The config is validated at startup: an unknown or misspelled key, a value of the wrong type, or an unsupported `method` stops the server with a message naming the offending location (e.g. `apis[0].entitySets[3].operations.update.method`). Omitted fields fall back to defaults: `server.version` to this package's version, `apis[].name` to `apis[<index>]` and `apis[].pathPrefix` to `/api/v1`.
 
 Each entry in `entitySets` supports:
 
@@ -181,8 +181,8 @@ Each entry in `entitySets` supports:
 |-------|----------|-------------|
 | `entitySet` | yes | Entity set name, also the tool name prefix (`<entitySet>_list`, `_get`, ...). |
 | `urlPath` | no | URL path segment, when it differs from `entitySet` (default: `entitySet`). |
-| `description` | yes | Human-readable description used in tool descriptions. |
-| `category` | yes | Category for `ENABLED_API_CATEGORIES` filtering. |
+| `description` | no | Human-readable description used in tool descriptions (default: `entitySet`). |
+| `category` | no | Category for `ENABLED_API_CATEGORIES` filtering. Without one, the entity set is only enabled when all categories are. |
 | `keys` | yes | Key properties: `[{ "name": "Id", "type": "string" \| "number" }]`. `get` and `delete` are only registered when keys are defined. |
 | `operations` | yes | `list`, `get`, `create`, `update`, `delete`. Each is `true`, `false`, or `{ "enabled": bool, "requiredScope": "..." }`. An omitted operation is disabled. |
 | `filterableProperties` | no | Property names hinted as `$filter` candidates. |
@@ -352,7 +352,7 @@ Per entry:
 | Field | Required | Description |
 |-------|----------|-------------|
 | `tool` | yes | MCP tool name. Registered read-only (`annotations.readOnlyHint: true`) with `_meta["ui/resourceUri"]` pointing at `uri`. |
-| `description` | yes | Tool description for the LLM. |
+| `description` | no | Tool description for the LLM. |
 | `uri` | yes | `ui://` resource URI. The template is also registered as an MCP resource at this URI (with `null` data), so MCP Apps hosts that pre-fetch templates can use render-data delivery. |
 | `template` | yes | HTML template file, path relative to the config file. File reads are cached. |
 | `inputs` | no | Tool parameters: `{ "name": { "type": "string"\|"number"\|"boolean", "required": bool, "default": val, "min": n, "max": n, "description": "..." } }`. Compiled into the tool's input schema. A `default` is applied during parsing, so placeholders referencing that parameter always resolve; `min`/`max` bound number inputs. |

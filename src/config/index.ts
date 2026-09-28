@@ -129,7 +129,7 @@ export const config: Config = loadConfig();
  * and the entity sets it exposes.
  */
 export interface ApiDefinition {
-  /** Logical name for this API (used for logging). */
+  /** Logical name for this API, used for logging and as its `api` label (default: `apis[<index>]`). */
   name: string;
   /** BTP Destination name (or local env var prefix) used to authenticate requests. */
   destination: string;
@@ -227,7 +227,7 @@ export interface UiViewDefinition {
   /** MCP tool name (e.g. "UI_SubaccountsOverview"). */
   tool: string;
   /** Tool description for the LLM. */
-  description: string;
+  description?: string;
   /** The ui:// resource URI the template is registered under. */
   uri: string;
   /** HTML template file path, relative to the API config file. */

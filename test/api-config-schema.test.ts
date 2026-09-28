@@ -67,25 +67,36 @@ test('an unknown update method is rejected', () => {
   );
 });
 
-test('fields with a runtime default or no reader may be omitted', () => {
+test('a minimal config omitting optional fields loads with their defaults', () => {
   const config = parseApiConfig({
-    server: { name: 's', version: '1' },
-    apis: [{
-      name: 'a',
-      destination: 'DEST',
-      entitySets: [{
-        entitySet: 'E',
-        description: 'e',
-        category: 'c',
-        keys: [{ name: 'Id', type: 'string' }],
-        operations: { list: true },
-        navigationProperties: [{ name: 'Items' }],
-      }],
-    }],
+    server: { name: 's' },
+    apis: [
+      { name: 'a', destination: 'DEST', entitySets: [] },
+      {
+        destination: 'DEST',
+        entitySets: [{
+          entitySet: 'E',
+          keys: [{ name: 'Id', type: 'string' }],
+          operations: { list: true },
+          navigationProperties: [{ name: 'Items' }],
+        }],
+      },
+    ],
+    ui: [{ tool: 'UI_E', uri: 'ui://e', template: 'e.html' }],
   }, 'cfg.json');
-  assert.equal(config.server.description, undefined);
-  assert.equal(config.apis[0].pathPrefix, undefined);
-  assert.deepEqual(config.apis[0].entitySets[0].navigationProperties, [{ name: 'Items' }]);
+  const packageVersion = JSON.parse(readFileSync(join(rootDir, 'package.json'), 'utf8')).version;
+  assert.deepEqual(config.server, { name: 's', version: packageVersion });
+  assert.deepEqual(config.apis.map((api) => api.name), ['a', 'apis[1]']);
+  assert.equal(config.apis[1].pathPrefix, undefined);
+  assert.deepEqual(config.apis[1].entitySets[0], {
+    entitySet: 'E',
+    description: 'E',
+    category: '',
+    keys: [{ name: 'Id', type: 'string' }],
+    operations: { list: true },
+    navigationProperties: [{ name: 'Items' }],
+  });
+  assert.equal(config.ui?.[0].description, undefined);
 });
 
 test('method is only accepted on update', () => {

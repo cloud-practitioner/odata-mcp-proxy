@@ -11,6 +11,7 @@ import { logger } from '../utils/logger.js';
  * "message-processing-logs"  ->  "Message Processing Logs"
  */
 function formatCategoryLabel(category: string): string {
+  if (!category) return 'Uncategorized';
   return category
     .split('-')
     .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
