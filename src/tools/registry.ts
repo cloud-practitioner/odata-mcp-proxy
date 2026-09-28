@@ -131,7 +131,8 @@ function formatKeyHint(keys: KeyProperty[]): string {
  * Verify that the user JWT contains the required scope.
  * Throws an error if the scope is missing or the token is invalid.
  *
- * Exported so the discovery executor enforces scopes identically rather than
+ * Tool handlers call this through {@link authorize}, which applies the
+ * enforcement policy; the discovery executor shares both rather than
  * reimplementing them — a second copy would be a security bug waiting to
  * drift.
  */
@@ -162,6 +163,35 @@ export function checkScope(requiredScope: string | undefined, jwt: string | unde
     }
     throw new Error('Unauthorized: invalid token');
   }
+}
+
+/**
+ * Scope-enforcement policy for tool registration.
+ */
+export interface ScopeOptions {
+  /**
+   * Whether `requiredScope` is checked against the caller's JWT. Only
+   * meaningful when the transport authenticates callers (HTTP with XSUAA
+   * bound); over stdio or unauthenticated HTTP there is never a caller token,
+   * so enforcing would reject every scoped call and backend access is
+   * governed by the destination credentials instead. Defaults to `true`, so
+   * programmatic callers keep the secure behaviour unless they opt out.
+   */
+  enforceScopes?: boolean;
+}
+
+/**
+ * Apply the scope policy: {@link checkScope} when enforcing, a no-op
+ * otherwise. Every tool handler (and the discovery executor) routes through
+ * this, so the policy lives in one place.
+ */
+export function authorize(
+  requiredScope: string | undefined,
+  jwt: string | undefined,
+  options: ScopeOptions = {},
+): void {
+  if (options.enforceScopes === false) return;
+  checkScope(requiredScope, jwt);
 }
 
 /**
@@ -198,6 +228,7 @@ export function registerEntityTools(
   server: McpServer,
   client: ODataClient,
   definition: EntitySetDefinition,
+  scopeOptions: ScopeOptions = {},
 ): void {
   const { entitySet, description, keys, operations, navigationProperties } = definition;
   const urlPath = definition.urlPath ?? entitySet;
@@ -216,7 +247,7 @@ export function registerEntityTools(
       `List ${description}. Returns a collection of entities with optional OData query options (GET).${keyHint}`,
       genericToolSchema,
       async (args, extra) => {
-        try { checkScope(opList.requiredScope, extra.authInfo?.token); }
+        try { authorize(opList.requiredScope, extra.authInfo?.token, scopeOptions); }
         catch (e) { return formatToolError(e instanceof Error ? e.message : String(e)); }
         return handleToolCall(client, 'GET', urlPath, undefined, args, extra.authInfo?.token);
       },
@@ -229,7 +260,7 @@ export function registerEntityTools(
       `Get a single ${description} by its key(s) (GET).${keyHint}`,
       genericToolSchema,
       async (args, extra) => {
-        try { checkScope(opGet.requiredScope, extra.authInfo?.token); }
+        try { authorize(opGet.requiredScope, extra.authInfo?.token, scopeOptions); }
         catch (e) { return formatToolError(e instanceof Error ? e.message : String(e)); }
         return handleToolCall(client, 'GET', urlPath, undefined, args, extra.authInfo?.token);
       },
@@ -242,7 +273,7 @@ export function registerEntityTools(
       `Create a new ${description} (POST). Provide entity properties in the body.`,
       genericToolSchema,
       async (args, extra) => {
-        try { checkScope(opCreate.requiredScope, extra.authInfo?.token); }
+        try { authorize(opCreate.requiredScope, extra.authInfo?.token, scopeOptions); }
         catch (e) { return formatToolError(e instanceof Error ? e.message : String(e)); }
         return handleToolCall(client, 'POST', urlPath, undefined, args, extra.authInfo?.token);
       },
@@ -262,7 +293,7 @@ export function registerEntityTools(
         : `Update ${description} (${updateMethod}). This is a collection-level update: provide the payload in body, no key in path.`,
       genericToolSchema,
       async (args, extra) => {
-        try { checkScope(opUpdate.requiredScope, extra.authInfo?.token); }
+        try { authorize(opUpdate.requiredScope, extra.authInfo?.token, scopeOptions); }
         catch (e) { return formatToolError(e instanceof Error ? e.message : String(e)); }
         return handleToolCall(client, updateMethod, urlPath, undefined, args, extra.authInfo?.token);
       },
@@ -275,7 +306,7 @@ export function registerEntityTools(
       `Delete a ${description} by its key(s) (DELETE).${keyHint}`,
       genericToolSchema,
       async (args, extra) => {
-        try { checkScope(opDelete.requiredScope, extra.authInfo?.token); }
+        try { authorize(opDelete.requiredScope, extra.authInfo?.token, scopeOptions); }
         catch (e) { return formatToolError(e instanceof Error ? e.message : String(e)); }
         return handleToolCall(client, 'DELETE', urlPath, undefined, args, extra.authInfo?.token);
       },
@@ -318,6 +349,7 @@ export function registerAllTools(
    * registering every entity set.
    */
   onlyEntitySets?: Set<string>,
+  scopeOptions: ScopeOptions = {},
 ): void {
   const isAll = enabledCategories.length === 1 && enabledCategories[0] === 'all';
 
@@ -336,7 +368,7 @@ export function registerAllTools(
       continue;
     }
 
-    registerEntityTools(server, client, def);
+    registerEntityTools(server, client, def, scopeOptions);
     registered++;
   }
 

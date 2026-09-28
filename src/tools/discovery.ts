@@ -25,7 +25,7 @@ import { DEFAULT_UPDATE_METHOD, resolveOperation, type DiscoveryDefinition } fro
 import {
   formatToolResult,
   formatToolError,
-  checkScope,
+  authorize,
   type EntitySetDefinition,
   type KeyProperty,
 } from './registry.js';
@@ -270,6 +270,8 @@ export interface DiscoveryOptions {
   index: IndexEntry[];
   /** Entity sets kept as individual tools in hybrid mode, for the tool description. */
   pinned: string[];
+  /** Whether `requiredScope` is checked against the caller JWT (default true). */
+  enforceScopes?: boolean;
 }
 
 /**
@@ -277,7 +279,7 @@ export interface DiscoveryOptions {
  * entity set.
  */
 export function registerDiscoveryTools(server: McpServer, options: DiscoveryOptions): void {
-  const { discovery, index, pinned } = options;
+  const { discovery, index, pinned, enforceScopes } = options;
   const maxResults = discovery.maxResults ?? DEFAULT_MAX_RESULTS;
   const maxFullResults = discovery.maxFullResults ?? DEFAULT_MAX_FULL_RESULTS;
 
@@ -428,7 +430,7 @@ export function registerDiscoveryTools(server: McpServer, options: DiscoveryOpti
       // Same scope enforcement as the generated per-entity tools.
       const resolved = resolveOperation(entry.definition.operations[operation]);
       try {
-        checkScope(resolved.requiredScope, extra.authInfo?.token);
+        authorize(resolved.requiredScope, extra.authInfo?.token, { enforceScopes });
       } catch (error) {
         return formatToolError(error instanceof Error ? error.message : String(error));
       }
