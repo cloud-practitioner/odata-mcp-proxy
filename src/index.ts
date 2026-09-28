@@ -192,9 +192,16 @@ export async function start(options: StartOptions = {}): Promise<void> {
   const xsuaa = config.mcpTransport === 'http' ? new XsuaaAuth() : undefined;
   const enforceScopes = xsuaa?.isConfigured() ?? false;
 
-  const declaresScopes = allEntitySets.some((def) =>
-    Object.values(def.operations).some((op) => resolveOperation(op).requiredScope),
-  );
+  const allCategories =
+    config.enabledApiCategories.length === 1 && config.enabledApiCategories[0] === 'all';
+  const declaresScopes = allEntitySets
+    .filter((def) => allCategories || config.enabledApiCategories.includes(def.category))
+    .some((def) =>
+      Object.values(def.operations).some((op) => {
+        const resolved = resolveOperation(op);
+        return resolved.enabled && Boolean(resolved.requiredScope);
+      }),
+    );
   if (declaresScopes && !enforceScopes) {
     const reason = config.mcpTransport === 'stdio' ? 'stdio transport' : 'XSUAA not bound';
     logger.warn(

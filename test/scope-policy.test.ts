@@ -1,7 +1,7 @@
 // Unit coverage of the `requiredScope` policy on the generated tools and the
 // discovery executor: enforcement is the default for programmatic callers,
 // `enforceScopes: false` lets tokenless calls through, and navigation tools
-// carry the entity set's read scope.
+// stay unscoped.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -58,12 +58,17 @@ test('registerAllTools without scope options still rejects a tokenless scoped ca
   const { mcp, server } = await connect((s) =>
     registerAllTools(s, fakeClient(calls), [PACKAGES], ['all']));
 
-  for (const name of ['IntegrationPackages_list', 'IntegrationPackages_IntegrationDesigntimeArtifacts_list']) {
-    const result = await mcp.callTool({ name, arguments: { path: "('P')" } }) as Result;
-    assert.equal(result.isError, true, name);
-    assert.match(result.content[0].text!, /Unauthorized: no token provided/);
-  }
+  const list = await mcp.callTool({ name: 'IntegrationPackages_list', arguments: {} }) as Result;
+  assert.equal(list.isError, true);
+  assert.match(list.content[0].text!, /Unauthorized: no token provided/);
   assert.deepEqual(calls, [], 'scope check must precede the backend call');
+
+  const nav = await mcp.callTool({
+    name: 'IntegrationPackages_IntegrationDesigntimeArtifacts_list',
+    arguments: { path: "('P')" },
+  }) as Result;
+  assert.ok(!nav.isError, nav.content[0].text);
+  assert.deepEqual(calls, ["GET IntegrationPackages('P')/IntegrationDesigntimeArtifacts"]);
   await server.close();
 });
 

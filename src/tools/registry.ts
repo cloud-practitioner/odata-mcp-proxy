@@ -307,10 +307,6 @@ export function registerEntityTools(
     );
   }
 
-  // Navigation reads are GETs on a single parent entity, so they take the
-  // entity set's `get` scope (falling back to `list` when get defines none).
-  const navScope = opGet.requiredScope ?? opList.requiredScope;
-
   if (navigationProperties) {
     for (const nav of navigationProperties) {
       server.tool(
@@ -318,11 +314,7 @@ export function registerEntityTools(
         `Get ${nav.description} for a specific ${description} (GET). ` +
           `Provide the parent entity key(s) in path, then /${nav.name} is appended automatically.${keyHint}`,
         genericToolSchema,
-        async (args, extra) => {
-          try { authorize(navScope, extra.authInfo?.token, scopeOptions); }
-          catch (e) { return formatToolError(e instanceof Error ? e.message : String(e)); }
-          return handleToolCall(client, 'GET', urlPath, nav.name, args, extra.authInfo?.token);
-        },
+        async (args, extra) => handleToolCall(client, 'GET', urlPath, nav.name, args, extra.authInfo?.token),
       );
     }
   }

@@ -541,9 +541,9 @@ Each entry in an entity set's `operations` is either a boolean or an object with
 }
 ```
 
-`requiredScope` is checked against the caller's JWT, so it is enforced only when the transport authenticates a caller: HTTP with an XSUAA service bound. There, `/mcp` rejects requests without a valid bearer token, and a tool call whose token lacks the scope (as `<xsappname>.<scope>` or the bare name) fails with `Forbidden`. Navigation tools (`<EntitySet>_<Nav>_list`) take the entity set's `get` scope, falling back to `list`.
+`requiredScope` is checked against the caller's JWT, so it is enforced only when the transport authenticates a caller: HTTP with an XSUAA service bound. There, `/mcp` rejects requests without a valid bearer token, and a tool call whose token lacks the scope (as `<xsappname>.<scope>` or the bare name) fails with `Forbidden`.
 
-Over stdio, or HTTP without XSUAA, there is no caller token, so `requiredScope` is not enforced and backend access is governed by the destination's own credentials. The server logs a warning at startup when the config declares scopes that will not be enforced.
+Over stdio, or HTTP without XSUAA, there is no caller token, so `requiredScope` is not enforced and backend access is governed by the destination's own credentials. The server logs a warning at startup when an enabled operation of a registered entity set declares a scope that will not be enforced.
 
 Programmatic callers of `registerAllTools` / `registerEntityTools` enforce scopes by default; pass `{ enforceScopes: false }` as the scope options to opt out.
 
