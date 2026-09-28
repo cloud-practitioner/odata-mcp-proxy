@@ -173,6 +173,39 @@ Create an `api-config.json` in your project root. The CLI automatically picks it
 }
 ```
 
+The config is validated at startup: an unknown or misspelled key, a value of the wrong type, or an unsupported `method` stops the server with a message naming the offending location (e.g. `apis[0].entitySets[3].operations.update.method`). Omitted fields fall back to defaults: `server.version` to this package's version, `apis[].name` to `api<index>` (e.g. `api0`) and `apis[].pathPrefix` to `/api/v1`.
+
+Each entry in `entitySets` supports:
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `entitySet` | yes | Entity set name, also the tool name prefix (`<entitySet>_list`, `_get`, ...). |
+| `urlPath` | no | URL path segment, when it differs from `entitySet` (default: `entitySet`). |
+| `description` | no | Human-readable description used in tool descriptions (default: `entitySet`). |
+| `category` | no | Category for `ENABLED_API_CATEGORIES` filtering. Without one, the entity set is only enabled when all categories are. |
+| `keys` | yes | Key properties: `[{ "name": "Id", "type": "string" \| "number" }]`. `get` and `delete` are only registered when keys are defined. |
+| `operations` | yes | `list`, `get`, `create`, `update`, `delete`. Each is `true`, `false`, or `{ "enabled": bool, "requiredScope": "..." }`. An omitted operation is disabled. |
+| `filterableProperties` | no | Property names hinted as `$filter` candidates. |
+| `selectableProperties` | no | Property names hinted as `$select` candidates. |
+| `navigationProperties` | no | `[{ "name": "...", "description": "...", "isCollection": bool }]` (`description` and `isCollection` optional), each registered as `<entitySet>_<name>_list`. |
+
+`requiredScope` restricts the operation to callers whose JWT carries that scope (either the bare name or the XSUAA `appname.scope` form).
+
+The `update` operation also accepts `method`: `"PATCH"` (default) or `"PUT"`. Use `PUT` where the API replaces rather than merges, such as Cloud Integration externalized parameters or API Management products:
+
+```json
+{
+  "entitySet": "IntegrationFlowConfigurations",
+  "urlPath": "IntegrationDesigntimeArtifacts",
+  "description": "externalized parameters of an integration flow",
+  "category": "integration-content",
+  "keys": [{ "name": "Id", "type": "string" }, { "name": "Version", "type": "string" }],
+  "operations": { "update": { "enabled": true, "requiredScope": "write", "method": "PUT" } }
+}
+```
+
+Calling `IntegrationFlowConfigurations_update` with path `(Id='MyFlow',Version='active')/$links/Configurations('MyParam')` and body `{ "ParameterValue": "new" }` then sends `PUT /api/v1/IntegrationDesigntimeArtifacts(Id='MyFlow',Version='active')/$links/Configurations('MyParam')`. The method appears in the tool description and in `search_operations` results, and `execute_operation` uses it too.
+
 You can also use a custom filename with the `--config` flag:
 
 ```bash
@@ -319,7 +352,7 @@ Per entry:
 | Field | Required | Description |
 |-------|----------|-------------|
 | `tool` | yes | MCP tool name. Registered read-only (`annotations.readOnlyHint: true`) with `_meta["ui/resourceUri"]` pointing at `uri`. |
-| `description` | yes | Tool description for the LLM. |
+| `description` | no | Tool description for the LLM. |
 | `uri` | yes | `ui://` resource URI. The template is also registered as an MCP resource at this URI (with `null` data), so MCP Apps hosts that pre-fetch templates can use render-data delivery. |
 | `template` | yes | HTML template file, path relative to the config file. File reads are cached. |
 | `inputs` | no | Tool parameters: `{ "name": { "type": "string"\|"number"\|"boolean", "required": bool, "default": val, "min": n, "max": n, "description": "..." } }`. Compiled into the tool's input schema. A `default` is applied during parsing, so placeholders referencing that parameter always resolve; `min`/`max` bound number inputs. |

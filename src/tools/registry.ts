@@ -2,7 +2,12 @@ import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { ODataClient } from '../client/odata-client.js';
-import { type OperationDefinition, resolveOperation } from '../config/index.js';
+import {
+  type OperationDefinition,
+  type UpdateOperationDefinition,
+  DEFAULT_UPDATE_METHOD,
+  resolveOperation,
+} from '../config/index.js';
 import { logger } from '../utils/logger.js';
 
 // ─── Tool Definition Types ───────────────────────────────────────────────────
@@ -20,19 +25,19 @@ export interface KeyProperty {
  */
 export interface NavigationProperty {
   name: string;
-  description: string;
-  isCollection: boolean;
+  description?: string;
+  isCollection?: boolean;
 }
 
 /**
- * Supported CRUD operations for an entity set.
+ * Supported CRUD operations for an entity set. An omitted operation is disabled.
  */
 export interface EntityOperations {
-  list: OperationDefinition;
-  get: OperationDefinition;
-  create: OperationDefinition;
-  update: OperationDefinition;
-  delete: OperationDefinition;
+  list?: OperationDefinition;
+  get?: OperationDefinition;
+  create?: OperationDefinition;
+  update?: UpdateOperationDefinition;
+  delete?: OperationDefinition;
 }
 
 /**
@@ -43,9 +48,9 @@ export interface EntitySetDefinition {
   entitySet: string;
   /** URL path segment override (defaults to entitySet when omitted) */
   urlPath?: string;
-  /** Human-readable description for LLM */
+  /** Human-readable description for LLM (default: the entity set name) */
   description: string;
-  /** API category for filtering */
+  /** API category for filtering (default: empty, so only enabled when all categories are) */
   category: string;
   /** Key properties for get/update/delete operations */
   keys: KeyProperty[];
@@ -276,20 +281,21 @@ export function registerEntityTools(
   }
 
   // Unlike get/delete, update is NOT gated on keys: REST-style collection
-  // endpoints legitimately accept a keyless PATCH with a body (BTP entitlement
+  // endpoints legitimately accept a keyless update with a body (BTP entitlement
   // assignments work exactly this way). A keyless get would duplicate list, and
   // a keyless delete would target the whole collection, so those stay gated.
   if (opUpdate.enabled) {
+    const updateMethod = opUpdate.method ?? DEFAULT_UPDATE_METHOD;
     server.tool(
       `${entitySet}_update`,
       keys.length > 0
-        ? `Update an existing ${description} (PATCH). Provide key(s) in path and properties in body.${keyHint}`
-        : `Update ${description} (PATCH). This is a collection-level update: provide the payload in body, no key in path.`,
+        ? `Update an existing ${description} (${updateMethod}). Provide key(s) in path and properties in body.${keyHint}`
+        : `Update ${description} (${updateMethod}). This is a collection-level update: provide the payload in body, no key in path.`,
       genericToolSchema,
       async (args, extra) => {
         try { authorize(opUpdate.requiredScope, extra.authInfo?.token, scopeOptions); }
         catch (e) { return formatToolError(e instanceof Error ? e.message : String(e)); }
-        return handleToolCall(client, 'PATCH', urlPath, undefined, args, extra.authInfo?.token);
+        return handleToolCall(client, updateMethod, urlPath, undefined, args, extra.authInfo?.token);
       },
     );
   }
@@ -311,7 +317,7 @@ export function registerEntityTools(
     for (const nav of navigationProperties) {
       server.tool(
         `${entitySet}_${nav.name}_list`,
-        `Get ${nav.description} for a specific ${description} (GET). ` +
+        `Get ${nav.description ?? nav.name} for a specific ${description} (GET). ` +
           `Provide the parent entity key(s) in path, then /${nav.name} is appended automatically.${keyHint}`,
         genericToolSchema,
         async (args, extra) => handleToolCall(client, 'GET', urlPath, nav.name, args, extra.authInfo?.token),
@@ -320,7 +326,7 @@ export function registerEntityTools(
   }
 
   logger.debug(`Registered tools for ${entitySet}`, {
-    operations: (Object.entries(operations) as [string, OperationDefinition][])
+    operations: (Object.entries(operations) as [string, OperationDefinition | undefined][])
       .filter(([, v]) => resolveOperation(v).enabled)
       .map(([k]) => k),
     navProps: navigationProperties?.map((n) => n.name) ?? [],

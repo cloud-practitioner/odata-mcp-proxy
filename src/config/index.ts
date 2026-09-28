@@ -5,6 +5,9 @@ import { readFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, isAbsolute } from 'node:path';
 import type { EntitySetDefinition } from '../tools/registry.js';
+import { parseApiConfig, type UpdateMethod } from './api-config-schema.js';
+
+export { UPDATE_METHODS, type UpdateMethod } from './api-config-schema.js';
 
 // Load default-env.json first (populates VCAP_SERVICES for local BTP dev),
 // then load .env for any remaining overrides.
@@ -126,12 +129,12 @@ export const config: Config = loadConfig();
  * and the entity sets it exposes.
  */
 export interface ApiDefinition {
-  /** Logical name for this API (used for logging). */
+  /** Logical name for this API, used for logging and as its `api` label (default: `api<index>`, e.g. `api0`). */
   name: string;
   /** BTP Destination name (or local env var prefix) used to authenticate requests. */
   destination: string;
-  /** OData path prefix, e.g. "/api/v1". */
-  pathPrefix: string;
+  /** OData path prefix (default: "/api/v1"). */
+  pathPrefix?: string;
   /** Entity sets exposed by this API. */
   entitySets: EntitySetDefinition[];
   /**
@@ -224,7 +227,7 @@ export interface UiViewDefinition {
   /** MCP tool name (e.g. "UI_SubaccountsOverview"). */
   tool: string;
   /** Tool description for the LLM. */
-  description: string;
+  description?: string;
   /** The ui:// resource URI the template is registered under. */
   uri: string;
   /** HTML template file path, relative to the API config file. */
@@ -287,7 +290,7 @@ export interface ApiConfig {
   server: {
     name: string;
     version: string;
-    description: string;
+    description?: string;
   };
   /** One entry per backend API. Each has its own destination, path prefix, and entity sets. */
   apis: ApiDefinition[];
@@ -355,18 +358,37 @@ export type OperationDefinition =
   | { enabled: boolean; requiredScope?: string };
 
 /**
+ * The update operation additionally chooses its HTTP method (default PATCH).
+ * PUT is needed where the API replaces rather than merges, e.g. CPI
+ * externalized parameters (`$links/Configurations`) and API Management
+ * products.
+ *
+ * Example: { enabled: true, requiredScope: "write", method: "PUT" }
+ */
+export type UpdateOperationDefinition =
+  | boolean
+  | { enabled: boolean; requiredScope?: string; method?: UpdateMethod };
+
+/** HTTP method of an update operation that does not configure one. */
+export const DEFAULT_UPDATE_METHOD: UpdateMethod = 'PATCH';
+
+/**
  * Normalise any OperationDefinition to a plain object so the rest
  * of the code never has to branch on boolean vs object.
  */
-export function resolveOperation(op: OperationDefinition | undefined): {
+export function resolveOperation(op: OperationDefinition | UpdateOperationDefinition | undefined): {
   enabled: boolean;
   requiredScope?: string;
+  method?: UpdateMethod;
 } {
   if (op === undefined || op === false) return { enabled: false };
   if (op === true) return { enabled: true };
-  return { enabled: op.enabled, requiredScope: op.requiredScope };
+  return {
+    enabled: op.enabled,
+    requiredScope: op.requiredScope,
+    method: 'method' in op ? op.method : undefined,
+  };
 }
-
 
 /**
  * Absolute path of the resolved API config file.
@@ -381,4 +403,21 @@ export const apiConfigDir: string = dirname(apiConfigPath);
  * API configuration — server identity and all API definitions.
  * Loaded from the file specified by `API_CONFIG_FILE` (default: api-config.json).
  */
-export const apiConfig: ApiConfig = JSON.parse(readFileSync(apiConfigPath, 'utf-8')) as ApiConfig;
+export const apiConfig: ApiConfig = loadApiConfig(apiConfigPath);
+
+/**
+ * Read and validate the API config file.
+ *
+ * @throws {Error} naming the file when it is not valid JSON or does not match
+ *   the schema, so a malformed config fails at startup instead of silently
+ *   disabling operations or falling back to defaults.
+ */
+function loadApiConfig(path: string): ApiConfig {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(readFileSync(path, 'utf-8'));
+  } catch (error) {
+    throw new Error(`API config file ${path} is not valid JSON: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return parseApiConfig(raw, path);
+}

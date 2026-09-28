@@ -11,6 +11,7 @@ import { logger } from '../utils/logger.js';
  * "message-processing-logs"  ->  "Message Processing Logs"
  */
 function formatCategoryLabel(category: string): string {
+  if (!category) return 'Uncategorized';
   return category
     .split('-')
     .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
@@ -84,8 +85,8 @@ function buildApiOverviewMarkdown(definitions: EntitySetDefinition[], serverName
         lines.push('**Navigation properties:**');
         lines.push('');
         for (const nav of def.navigationProperties) {
-          const collectionTag = nav.isCollection ? 'collection' : 'single';
-          lines.push(`- \`${nav.name}\` (${collectionTag}) — ${nav.description}`);
+          const collectionTag = nav.isCollection === undefined ? '' : ` (${nav.isCollection ? 'collection' : 'single'})`;
+          lines.push(`- \`${nav.name}\`${collectionTag} — ${nav.description ?? nav.name}`);
         }
         lines.push('');
       }

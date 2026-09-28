@@ -28,7 +28,7 @@ npm run build:btp    # Build MTA archive
 npm run deploy:btp   # Deploy via CF CLI
 ```
 
-Tests live in `test/` (unit tests for the UI layer, destination fallback and response decoding, plus stdio end-to-end tests against stub configs in `test/fixtures/`; `e2e-binary.test.ts` runs a local HTTP stub standing in for the OAuth endpoint and CPI).
+Tests live in `test/` (unit tests for the API config schema, UI layer, destination fallback and response decoding, plus stdio end-to-end tests against stub configs in `test/fixtures/`; `e2e-binary.test.ts` and `e2e-method.test.ts` run a local HTTP stub standing in for the OAuth endpoint and CPI).
 
 ## Architecture
 
@@ -72,13 +72,14 @@ API categories (can be filtered via `ENABLED_API_CATEGORIES` env var):
 | `src/cli.ts` | CLI entry point (`--config` flag, then calls `start()`) |
 | `src/server/mcp-server.ts` | MCP server factory |
 | `src/server/http.ts` | Express HTTP server and session management |
-| `src/client/odata-client.ts` | OData HTTP client (GET/POST/PATCH/DELETE, binary downloads) |
+| `src/client/odata-client.ts` | OData HTTP client (GET/POST/PATCH/PUT/DELETE, binary downloads) |
 | `src/client/destination-service.ts` | Credential resolution (BTP vs local) |
 | `src/client/retry.ts` | Exponential backoff retry logic |
 | `src/tools/registry.ts` | Tool registration and OData call handlers |
 | `src/ui/` | Config-driven MCP-UI views (lazy-loaded; template rendering, data fetching, tool/resource registration) |
 | `src/config/api-config.json` | All API definitions (destinations, path prefixes, entity sets) |
 | `src/config/index.ts` | Zod-validated config loaded from environment; `ApiDefinition` / `ApiConfig` types |
+| `src/config/api-config-schema.ts` | Strict Zod schema for the API config file (unknown keys and invalid values fail at startup; applies field defaults) |
 | `src/types/entities.ts` | TypeScript interfaces for OData entities |
 | `src/utils/logger.ts` | Winston logger (dev: pretty, prod: JSON) |
 
@@ -124,13 +125,15 @@ Destination names and path prefixes live under the `apis` array. Each entry supp
 }
 ```
 
-- `name`: used for logging
+- `name`: used for logging (default: `api<index>`)
 - `destination`: BTP Destination name on BTP, or the env var prefix for local dev (see below)
 - `csrfProtected`: set to `false` for REST APIs that do not use SAP OData CSRF tokens (default: `true`)
 - `entitySet`: tool name prefix (PascalCase)
 - `urlPath`: URL path segment override (defaults to `entitySet` when omitted; useful when REST path casing differs from the tool name)
 
 Add more objects to the array to expose additional backend APIs — each gets its own `ODataClient` instance.
+
+The file is validated against `src/config/api-config-schema.ts` at startup. The README section on `api-config.json` owns the full field reference, defaults, and the per-entity-set `update.method` (`PATCH` default, or `PUT`).
 
 The config may also contain an optional top-level `ui` array of interactive MCP-UI views (read-only tools that fetch declared data sources through the shared clients and return an HTML template with the JSON payload baked into the `"__DATA__"` token). See the README section "Interactive UI Views (mcp-ui)" for the schema. The `src/ui/` module and `@mcp-ui/server` load lazily, only when a config declares UI views.
 
