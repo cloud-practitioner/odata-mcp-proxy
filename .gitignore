@@ -33,3 +33,4 @@ default-env.json
 
 # OS specific
 .DS_Store
+.provisioned
