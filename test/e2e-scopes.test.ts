@@ -9,7 +9,10 @@
 //     operations or on entity sets filtered out by ENABLED_API_CATEGORIES do
 //     not trigger the warning.
 //   - HTTP without XSUAA: same, over Streamable HTTP.
-//   - HTTP with XSUAA bound: a request without a bearer token is rejected.
+//   - HTTP with XSUAA bound: a request without a bearer token is rejected,
+//     and an XSUAA-authenticated caller (a token signed with a test key the
+//     fake binding trusts) reaches a navigation tool only with the parent's
+//     read scope, like `_list` with the navigation path and execute_operation.
 //
 // Run `npm run build` first (the `npm test` script does).
 import { test, before, after } from 'node:test';
@@ -20,6 +23,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { existsSync } from 'node:fs';
+import { createSign, generateKeyPairSync } from 'node:crypto';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
@@ -286,7 +290,16 @@ test('HTTP without XSUAA: scoped tools reach the backend', async () => {
     const list = await call(client, 'IntegrationPackages_list', {});
     assert.ok(!list.isError, textOf(list));
     assert.deepEqual(JSON.parse(textOf(list)), PACKAGES);
-    assert.deepEqual(backendCalls, ['GET /api/v1/IntegrationPackages']);
+
+    const nav = await call(client, 'IntegrationPackages_IntegrationDesigntimeArtifacts_list', {
+      path: "('Pkg_A')",
+    });
+    assert.ok(!nav.isError, textOf(nav));
+    assert.deepEqual(JSON.parse(textOf(nav)), ARTIFACTS);
+    assert.deepEqual(backendCalls, [
+      'GET /api/v1/IntegrationPackages',
+      "GET /api/v1/IntegrationPackages('Pkg_A')/IntegrationDesigntimeArtifacts",
+    ]);
   } finally {
     await client.close();
     await stopHttp(child);
@@ -332,6 +345,103 @@ test('HTTP with XSUAA bound: a request without a bearer token is rejected', asyn
       error: 'unauthorized',
       error_description: 'Missing Bearer token',
     });
+  } finally {
+    await stopHttp(child);
+  }
+});
+
+// ─── HTTP with XSUAA: scopes on navigation tools ─────────────────────────────
+
+/**
+ * A fake XSUAA binding that trusts a locally generated key, and a signer for
+ * tokens @sap/xssec accepts against it. Tokens carry no `jku`/`kid`, so xssec
+ * verifies them with the binding's `verificationkey` without fetching keys.
+ */
+function fakeXsuaa() {
+  const { publicKey, privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const vcap = {
+    xsuaa: [{
+      label: 'xsuaa',
+      name: 'e2e-xsuaa',
+      tags: ['xsuaa'],
+      credentials: {
+        clientid: 'sb-e2e',
+        clientsecret: 'secret',
+        url: baseUrl,
+        uaadomain: '127.0.0.1',
+        xsappname: 'e2e',
+        verificationkey: publicKey.export({ type: 'spki', format: 'pem' }).toString(),
+      },
+    }],
+  };
+  const part = (o: unknown) => Buffer.from(JSON.stringify(o)).toString('base64url');
+  const sign = (scopes: string[]): string => {
+    const now = Math.floor(Date.now() / 1000);
+    const unsigned = `${part({ alg: 'RS256', typ: 'JWT' })}.${part({
+      azp: 'sb-e2e', cid: 'sb-e2e', client_id: 'sb-e2e', aud: ['sb-e2e', 'e2e'],
+      zid: 'e2e-zone', ext_attr: { enhancer: 'XSUAA' }, grant_type: 'client_credentials',
+      scope: scopes, iat: now, exp: now + 600,
+    })}`;
+    return `${unsigned}.${createSign('RSA-SHA256').update(unsigned).sign(privateKey).toString('base64url')}`;
+  };
+  return { vcap, sign };
+}
+
+test('HTTP with XSUAA bound: navigation tools enforce the parent read scope', async () => {
+  const { vcap, sign } = fakeXsuaa();
+  // With VCAP_SERVICES present the SAP Cloud SDK resolves destinations by
+  // name; the `destinations` env var points E2E_SCOPES_DEST at the stub.
+  const { url, child } = await startHttp({
+    VCAP_SERVICES: JSON.stringify(vcap),
+    destinations: JSON.stringify([{ name: 'E2E_SCOPES_DEST', url: baseUrl }]),
+  });
+
+  async function connectAs(scopes: string[]): Promise<Client> {
+    const client = new Client({ name: 'e2e-scopes-xsuaa', version: '0.0.0' });
+    await client.connect(new StreamableHTTPClientTransport(new URL(`${url}/mcp`), {
+      requestInit: { headers: { Authorization: `Bearer ${sign(scopes)}` } },
+    }));
+    return client;
+  }
+
+  const navigationPaths: Array<[string, Record<string, unknown>]> = [
+    ['IntegrationPackages_IntegrationDesigntimeArtifacts_list', { path: "('Pkg_A')" }],
+    ['IntegrationPackages_list', { path: "('Pkg_A')/IntegrationDesigntimeArtifacts" }],
+    ['execute_operation', {
+      api: 'cpi', entitySet: 'IntegrationPackages', operation: 'list',
+      path: "('Pkg_A')", navProperty: 'IntegrationDesigntimeArtifacts',
+    }],
+  ];
+
+  try {
+    const withoutScope = await connectAs(['e2e.write']);
+    try {
+      backendCalls.length = 0;
+      for (const [name, args] of navigationPaths) {
+        const result = await call(withoutScope, name, args);
+        assert.equal(result.isError, true, `${name} must refuse a token without the read scope`);
+        assert.match(textOf(result), /Forbidden: operation requires scope 'read'/, name);
+      }
+      assert.deepEqual(backendCalls, [], 'a refused call must not reach the backend');
+    } finally {
+      await withoutScope.close();
+    }
+
+    const withScope = await connectAs(['e2e.read']);
+    try {
+      backendCalls.length = 0;
+      for (const [name, args] of navigationPaths) {
+        const result = await call(withScope, name, args);
+        assert.ok(!result.isError, `${name}: ${textOf(result)}`);
+        assert.deepEqual(JSON.parse(textOf(result)), ARTIFACTS, name);
+      }
+      assert.deepEqual(
+        backendCalls,
+        navigationPaths.map(() => "GET /api/v1/IntegrationPackages('Pkg_A')/IntegrationDesigntimeArtifacts"),
+      );
+    } finally {
+      await withScope.close();
+    }
   } finally {
     await stopHttp(child);
   }

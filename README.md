@@ -187,9 +187,9 @@ Each entry in `entitySets` supports:
 | `operations` | yes | `list`, `get`, `create`, `update`, `delete`. Each is `true`, `false`, or `{ "enabled": bool, "requiredScope": "..." }`. An omitted operation is disabled. |
 | `filterableProperties` | no | Property names hinted as `$filter` candidates. |
 | `selectableProperties` | no | Property names hinted as `$select` candidates. |
-| `navigationProperties` | no | `[{ "name": "...", "description": "...", "isCollection": bool }]` (`description` and `isCollection` optional), each registered as `<entitySet>_<name>_list`. |
+| `navigationProperties` | no | `[{ "name": "...", "description": "...", "isCollection": bool }]` (`description` and `isCollection` optional), each registered as `<entitySet>_<name>_list` when the entity set has an enabled read operation (`list`, or `get` with keys). |
 
-`requiredScope` restricts the operation to callers whose JWT carries that scope (either the bare name or the XSUAA `appname.scope` form).
+`requiredScope` restricts the operation to callers whose JWT carries that scope (either the bare name or the XSUAA `appname.scope` form). Navigation tools have no scope of their own: they enforce the entity set's read scopes (see [Operation Scopes](#operation-scopes)).
 
 The `update` operation also accepts `method`: `"PATCH"` (default) or `"PUT"`. Use `PUT` where the API replaces rather than merges, such as Cloud Integration externalized parameters or API Management products:
 
@@ -575,6 +575,8 @@ Each entry in an entity set's `operations` is either a boolean or an object with
 ```
 
 `requiredScope` is checked against the caller's JWT, so it is enforced only when the transport authenticates a caller: HTTP with an XSUAA service bound. There, `/mcp` rejects requests without a valid bearer token, and a tool call whose token lacks the scope (as `<xsappname>.<scope>` or the bare name) fails with `Forbidden`.
+
+Navigation tools (`<EntitySet>_<NavProperty>_list`) enforce the `requiredScope` of the entity set's read operations: the call is allowed when the caller holds the scope of the enabled `list` or of the enabled `get` (`get` counts only when the entity set has keys). Either one suffices, and an enabled read operation without `requiredScope` leaves the navigation tool unscoped. The rule follows from the other ways to reach the same URL: `<EntitySet>(<key>)/<NavProperty>` is also the `path` of `<EntitySet>_list` or `<EntitySet>_get`, or an `execute_operation` `list`/`get` call with `navProperty`, and each of those checks its operation's scope. The navigation tool therefore grants exactly what those read paths grant, never more. An entity set without an enabled read operation registers no navigation tools, because no read path exists to grant them.
 
 Over stdio, or HTTP without XSUAA, there is no caller token, so `requiredScope` is not enforced and backend access is governed by the destination's own credentials. The server logs a warning at startup when an enabled operation of a registered entity set declares a scope that will not be enforced.
 
