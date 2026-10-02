@@ -40,7 +40,7 @@
     "@sap-cloud-sdk/http-client": "4.2.0",
     "@sap-cloud-sdk/resilience": "4.5.1",
     "@sap-cloud-sdk/util": "^4.0.0",
-    "@sap/xsenv": "^4.0.0",
+    "@sap/xsenv": "^6.2.2",
     "@sap/xssec": "^3.6.2",
     "cors": "^2.8.6",
     "dotenv": "^16.4.0",
@@ -57,6 +57,6 @@
     "typescript": "^5.7.0"
   },
   "engines": {
-    "node": "20.x"
+    "node": "22.x"
   }
 }
