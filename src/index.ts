@@ -16,6 +16,7 @@ import { initLogger, logger } from './utils/logger.js';
 import { resolveDestination } from './client/destination-service.js';
 import { ODataClient } from './client/odata-client.js';
 import { createMcpServer } from './server/mcp-server.js';
+import { SessionStore } from './server/sessions.js';
 import { registerAllTools } from './tools/registry.js';
 import { registerApiDocResources } from './resources/index.js';
 import { XsuaaAuth } from './auth/xsuaa-auth.js';
@@ -242,7 +243,7 @@ export async function start(options: StartOptions = {}): Promise<void> {
       });
     }
 
-    registerApiDocResources(server, allEntitySets, apiConfig.server.name);
+    registerApiDocResources(server, allEntitySets, apiConfig.server.name, config.enabledApiCategories);
 
     registerUiTools?.(server, { views: uiViews, clientsByApi, baseDir: apiConfigDir });
 
@@ -266,12 +267,19 @@ export async function start(options: StartOptions = {}): Promise<void> {
 
     const app = createHttpServer(config.port, xsuaa!);
 
-    // Map of active sessions (sessionId -> transport + server) for stateful mode.
+    // Active sessions (sessionId -> transport + server) for stateful mode.
+    // The store evicts and closes sessions idle past the configured TTL so a
+    // client that disconnects without DELETE cannot leak its server/transport.
     type Session = {
       transport: InstanceType<typeof StreamableHTTPServerTransport>;
       server: McpServer;
     };
-    const sessions = new Map<string, Session>();
+    const sessions = new SessionStore<Session>(
+      config.sessionIdleTtlMs,
+      (s) => s.server.close(),
+    );
+    // Sweep at the TTL cadence, capped so eviction stays reasonably prompt.
+    sessions.startSweeping(Math.max(1000, Math.min(config.sessionIdleTtlMs, 60_000)));
 
     // Handler for POST /mcp — initialization and JSON-RPC requests
     app.post('/mcp', async (req, res) => {
@@ -307,25 +315,11 @@ export async function start(options: StartOptions = {}): Promise<void> {
 
       // This is an initialize request.
       //
-      // If there is an existing session for the given ID (client reconnecting
-      // without first sending DELETE), close it gracefully before creating the
-      // new one so we don't leak transports.
-      if (sessionId && sessions.has(sessionId)) {
-        const { server: oldServer } = sessions.get(sessionId)!;
-        sessions.delete(sessionId);
-        try { await oldServer.close(); } catch { /* ignore cleanup errors */ }
-        logger.debug('Closed stale session before re-initialize', { sessionId });
-      }
-
-      // Re-use the client's session ID when one is present in the request.
-      //
-      // Some clients (e.g. MCP Inspector) pre-populate the previous session ID
-      // in their request headers and rely on it for all subsequent requests in
-      // the same connect() call — even after receiving a fresh ID from the
-      // initialize response — because the old ID in requestInit.headers
-      // overwrites the new one in the transport's _commonHeaders() merge.
-      // By echoing back the same ID we keep the server and client in sync.
-      const assignedSessionId = sessionId ?? randomUUID();
+      // The session ID is always generated server-side and never taken from the
+      // client: a client-chosen ID would let any caller who learns another
+      // session's ID re-initialize or tear it down (a DoS / session mix-up).
+      // A client-supplied `mcp-session-id` on initialize is therefore ignored.
+      const assignedSessionId = randomUUID();
 
       const server = createMcpSession();
 
@@ -358,9 +352,12 @@ export async function start(options: StartOptions = {}): Promise<void> {
       const sessionId = req.headers['mcp-session-id'] as string | undefined;
 
       if (!sessionId || !sessions.has(sessionId)) {
-        res.status(400).json({
-          error: 'Bad Request',
-          message: 'Missing or invalid mcp-session-id header.',
+        // Unknown or missing session: the spec expects 404 so the client knows
+        // to start a fresh session rather than treating it as a bad request.
+        res.status(404).json({
+          jsonrpc: '2.0',
+          error: { code: -32001, message: 'Session not found' },
+          id: null,
         });
         return;
       }
@@ -374,9 +371,12 @@ export async function start(options: StartOptions = {}): Promise<void> {
       const sessionId = req.headers['mcp-session-id'] as string | undefined;
 
       if (!sessionId || !sessions.has(sessionId)) {
-        res.status(400).json({
-          error: 'Bad Request',
-          message: 'Missing or invalid mcp-session-id header.',
+        // Unknown or missing session: the spec expects 404 so the client knows
+        // to start a fresh session rather than treating it as a bad request.
+        res.status(404).json({
+          jsonrpc: '2.0',
+          error: { code: -32001, message: 'Session not found' },
+          id: null,
         });
         return;
       }
@@ -400,8 +400,9 @@ export async function start(options: StartOptions = {}): Promise<void> {
     const shutdown = async (signal: string): Promise<void> => {
       logger.info(`Received ${signal}, shutting down gracefully...`);
 
+      sessions.stopSweeping();
       try {
-        await Promise.all([...sessions.values()].map(({ server }) => server.close()));
+        await Promise.all(sessions.values().map(({ server }) => server.close()));
         logger.info('All MCP sessions closed');
       } catch (error) {
         logger.error('Error during shutdown', {

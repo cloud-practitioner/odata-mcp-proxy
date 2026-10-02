@@ -545,6 +545,7 @@ All configuration is managed through environment variables. The server validates
 | `PORT` | No | `4004` | HTTP server port (only used when `MCP_TRANSPORT=http`) |
 | `LOG_LEVEL` | No | `info` | Logging level: `error`, `warn`, `info`, `debug` |
 | `REQUEST_TIMEOUT` | No | `60000` | HTTP request timeout in milliseconds |
+| `SESSION_IDLE_TTL_MS` | No | `1800000` | Idle HTTP session TTL in ms; inactive sessions are evicted and closed (HTTP mode) |
 | `ENABLED_API_CATEGORIES` | No | `all` | Comma-separated list of API categories to enable (see below) |
 
 ### API Categories
