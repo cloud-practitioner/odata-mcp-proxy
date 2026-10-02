@@ -428,3 +428,22 @@ export function registerAllTools(
 
   logger.info(`Tool registration complete: ${registered} entity sets registered, ${skipped} skipped`);
 }
+
+/**
+ * Return the requested API categories that match no entity set.
+ *
+ * `ENABLED_API_CATEGORIES` filters tools against `def.category`. A typo
+ * silently registers nothing and the server then answers `tools/list` with no
+ * tools, so callers should fail or warn when any requested category is unknown
+ * rather than let a misconfiguration pass unnoticed. `["all"]` matches
+ * everything and is never unknown.
+ */
+export function findUnknownCategories(
+  enabledCategories: string[],
+  definitions: EntitySetDefinition[],
+): string[] {
+  const isAll = enabledCategories.length === 1 && enabledCategories[0] === 'all';
+  if (isAll) return [];
+  const available = new Set(definitions.map((def) => def.category));
+  return enabledCategories.filter((category) => !available.has(category));
+}
