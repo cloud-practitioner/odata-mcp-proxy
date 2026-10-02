@@ -73,11 +73,10 @@ cp .env.example .env
 Edit `.env` and set at minimum:
 
 ```dotenv
-SAP_DESTINATION_NAME=your_ci_destination_name
 MCP_TRANSPORT=stdio
 ```
 
-> **Note:** For local development with stdio transport, you must have BTP Destination Service credentials available in your environment (e.g., via `VCAP_SERVICES` or a `default-env.json` file).
+> **Note:** Destination names live in `src/config/api-config.json`, not in an env var. For local development without BTP, set the per-destination OAuth2 credentials (e.g. `CPI_DESTINATION_BASE_URL`, `CPI_DESTINATION_TOKEN_URL`, `CPI_DESTINATION_CLIENT_ID`, `CPI_DESTINATION_CLIENT_SECRET`); see [docs/LOCAL_RUN.md](docs/LOCAL_RUN.md). On BTP, credentials come from the bound Destination service via `VCAP_SERVICES`.
 
 ### 3. Build and run
 
@@ -104,7 +103,6 @@ Add the server to your Claude Desktop MCP configuration (`claude_desktop_config.
       "args": ["dist/index.js"],
       "cwd": "/path/to/odata-mcp-proxy",
       "env": {
-        "SAP_DESTINATION_NAME": "your_ci_destination_name",
         "MCP_TRANSPORT": "stdio"
       }
     }
@@ -542,12 +540,16 @@ All configuration is managed through environment variables. The server validates
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `SAP_DESTINATION_NAME` | Yes | -- | BTP Destination name pointing to your Cloud Integration tenant |
 | `MCP_TRANSPORT` | No | `http` | Transport mode: `http` (BTP deployment) or `stdio` (Claude Desktop) |
 | `PORT` | No | `4004` | HTTP server port (only used when `MCP_TRANSPORT=http`) |
 | `LOG_LEVEL` | No | `info` | Logging level: `error`, `warn`, `info`, `debug` |
 | `REQUEST_TIMEOUT` | No | `60000` | HTTP request timeout in milliseconds |
 | `ENABLED_API_CATEGORIES` | No | `all` | Comma-separated list of API categories to enable (see below) |
+| `API_CONFIG_FILE` | No | `api-config.json` | Config file name or absolute path. A relative name is resolved against the current working directory, then the entry-script directory, then the package's bundled `dist/config/`. |
+| `CORS_ORIGIN` | No | -- | Allowed CORS origin for the HTTP transport. Only enforced when `NODE_ENV=production`; unset in production disables cross-origin requests. In non-production any origin is reflected. |
+| `NODE_ENV` | No | -- | Set to `production` to tighten CORS to `CORS_ORIGIN` (otherwise all origins are reflected for local development). |
+
+> **Destinations and credentials** are configured in `src/config/api-config.json` (the `destination` field), not via env vars. On BTP they resolve through the bound Destination service; for local development the per-destination OAuth2 env vars are derived from the `destination` name (see [docs/LOCAL_RUN.md](docs/LOCAL_RUN.md)).
 
 ### API Categories
 
@@ -725,7 +727,7 @@ MCP_TRANSPORT=stdio npm start
 
 - **Runtime:** Node.js 20+ with ES Modules
 - **Language:** TypeScript 5.7+
-- **MCP SDK:** `@modelcontextprotocol/sdk` 1.17+
+- **MCP SDK:** `@modelcontextprotocol/sdk` 1.27+
 - **SAP Cloud SDK:** `@sap-cloud-sdk/connectivity` and `@sap-cloud-sdk/http-client` 4.x for destination resolution and HTTP calls
 - **Validation:** Zod for configuration and input validation
 - **HTTP Framework:** Express 4.x (HTTP transport only)

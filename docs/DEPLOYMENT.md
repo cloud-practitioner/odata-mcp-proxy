@@ -13,7 +13,7 @@ Before you begin, make sure the following are in place:
   ```bash
   npm install -g mbt
   ```
-- **Node.js >= 18** installed (see `engines` in `package.json`).
+- **Node.js 20** installed (see `engines` in `package.json`; `@sap/xsenv` supports up to Node 20).
 - **SAP Integration Suite** subscription in your subaccount with the **Cloud Integration** capability activated.
 - **Process Integration Runtime** service instance (plan: **api**) with the required authorization roles (see next section).
 
@@ -49,7 +49,7 @@ In the SAP BTP cockpit, navigate to **Connectivity > Destinations** in the subac
 
 | Property               | Value                                                                                   |
 | ---------------------- | --------------------------------------------------------------------------------------- |
-| **Name**               | The value you will set for `SAP_DESTINATION_NAME` (e.g. `CPI_Tenant`)                  |
+| **Name**               | Must match the `destination` field in `src/config/api-config.json` (default `CPI_DESTINATION`)         |
 | **Type**               | `HTTP`                                                                                  |
 | **URL**                | `https://<tenant>.it-cpiXXX.cfapps.<region>.hana.ondemand.com/api/v1`                   |
 | **Proxy Type**         | `Internet`                                                                              |
@@ -62,37 +62,24 @@ In the SAP BTP cockpit, navigate to **Connectivity > Destinations** in the subac
 
 ## 4. Configure Environment Variables
 
-The application requires the `SAP_DESTINATION_NAME` environment variable to be set. You can configure this in one of two ways:
+The server reads **no** `SAP_DESTINATION_NAME` variable. On BTP the destination
+is resolved by name through the bound Destination service, and that name must
+match the `destination` field in `src/config/api-config.json` (default
+`CPI_DESTINATION`). Make sure the BTP destination you created in Section 3 uses
+exactly that name.
 
-**Option A -- Set via `cf set-env` after deployment:**
-
-```bash
-cf set-env odata-mcp-proxy SAP_DESTINATION_NAME "CPI_Tenant"
-cf restage odata-mcp-proxy
-```
-
-**Option B -- Add to `mta.yaml` properties (before building):**
-
-In `mta.yaml`, add a `properties` block under the module:
-
-```yaml
-modules:
-  - name: odata-mcp-proxy
-    # ... existing config ...
-    properties:
-      SAP_DESTINATION_NAME: CPI_Tenant
-```
-
-Other optional environment variables (all have sensible defaults):
+All environment variables are optional and have sensible defaults:
 
 | Variable                  | Default   | Description                                            |
 | ------------------------- | --------- | ------------------------------------------------------ |
-| `SAP_DESTINATION_NAME`    | (required)| BTP destination name pointing to your CPI tenant       |
 | `MCP_TRANSPORT`           | `http`    | Transport mode (`http` or `stdio`)                     |
 | `PORT`                    | `4004`    | HTTP server port (Cloud Foundry assigns this automatically) |
 | `LOG_LEVEL`               | `info`    | Logging level (`error`, `warn`, `info`, `debug`)       |
 | `REQUEST_TIMEOUT`         | `60000`   | HTTP request timeout in milliseconds                   |
 | `ENABLED_API_CATEGORIES`  | `all`     | Comma-separated list of API categories to enable       |
+| `API_CONFIG_FILE`         | `api-config.json` | Config file name or absolute path                |
+| `NODE_ENV`                | --        | Set to `production` to restrict CORS to `CORS_ORIGIN`  |
+| `CORS_ORIGIN`             | --        | Allowed CORS origin (only enforced when `NODE_ENV=production`) |
 
 > **Note:** On Cloud Foundry the `PORT` variable is set automatically by the platform. Do not override it.
 
@@ -186,9 +173,9 @@ Configure your MCP client to connect to this URL. If XSUAA authentication is enf
 
 | Symptom                            | Likely Cause                                                        | Fix                                                                                     |
 | ---------------------------------- | ------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| App crashes on startup              | `SAP_DESTINATION_NAME` not set                                     | Set the env variable and restage (`cf restage odata-mcp-proxy`)                    |
+| App crashes on startup              | Destination service not bound, or destination missing              | Ensure the app is bound to `odata-mcp-proxy-destination` and the destination exists; restage (`cf restage odata-mcp-proxy`) |
 | `401 Unauthorized` from CPI APIs   | Missing roles on the Process Integration Runtime service key       | Recreate the service key with the required roles (see Section 2)                        |
-| Destination not found               | Destination name mismatch or missing destination service binding   | Verify the destination name matches `SAP_DESTINATION_NAME` and the app is bound to `odata-mcp-proxy-destination` |
+| Destination not found               | Destination name mismatch or missing destination service binding   | Verify the BTP destination Name matches the `destination` field in `api-config.json` (default `CPI_DESTINATION`) and the app is bound to `odata-mcp-proxy-destination` |
 | Health check fails                  | App not listening on the assigned `PORT`                           | Ensure you are not overriding `PORT`; the platform assigns it automatically             |
 | `mbt build` fails                   | MBT not installed                                                  | Run `npm install -g mbt`                                                                |
 | `cf deploy` fails                   | Not logged in or wrong target                                      | Run `cf login` and `cf target -o <org> -s <space>`                                      |

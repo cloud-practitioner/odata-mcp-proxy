@@ -28,7 +28,7 @@ npm run build:btp    # Build MTA archive
 npm run deploy:btp   # Deploy via CF CLI
 ```
 
-Tests live in `test/` (unit tests for the API config schema, UI layer, destination fallback and response decoding, plus stdio end-to-end tests against stub configs in `test/fixtures/`; `e2e-binary.test.ts` and `e2e-method.test.ts` run a local HTTP stub standing in for the OAuth endpoint and CPI).
+Tests live in `test/` (unit tests for the API config schema, UI layer, destination fallback and response decoding, the `/health` version endpoint and the npm-pack packaging guard, plus stdio end-to-end tests against stub configs in `test/fixtures/`; `e2e-binary.test.ts` runs a local HTTP stub standing in for the OAuth endpoint and CPI). `e2e-method.test.ts` also exists as a local-HTTP-stub test but is not part of the default `npm test` script.
 
 ## Architecture
 
@@ -50,7 +50,7 @@ AI Assistant → MCP Protocol → McpServer (tool registry) → ODataClient → 
 3. `ODataClient` (`src/client/odata-client.ts`) resolves the destination and executes the HTTP request via SAP Cloud SDK
 4. `resolveDestination()` (`src/client/destination-service.ts`) returns credentials:
    - **BTP mode**: Uses `@sap-cloud-sdk/connectivity` with bound VCAP_SERVICES
-   - **Local mode**: Uses env vars (`SAP_CPI_BASE_URL`, `SAP_CPI_CLIENT_ID`, `SAP_CPI_CLIENT_SECRET`, `SAP_CPI_TOKEN_URL`) for direct OAuth2
+   - **Local mode**: Uses env vars derived from the `destination` field (e.g. `CPI_DESTINATION_BASE_URL`, `CPI_DESTINATION_CLIENT_ID`, `CPI_DESTINATION_CLIENT_SECRET`, `CPI_DESTINATION_TOKEN_URL`) for direct OAuth2
 
 ### Tool Registration Pattern
 
@@ -74,7 +74,6 @@ API categories (can be filtered via `ENABLED_API_CATEGORIES` env var):
 | `src/server/http.ts` | Express HTTP server |
 | `src/client/odata-client.ts` | OData HTTP client (GET/POST/PATCH/PUT/DELETE, binary downloads) |
 | `src/client/destination-service.ts` | Credential resolution (BTP vs local) |
-| `src/client/retry.ts` | Exponential backoff retry logic |
 | `src/tools/registry.ts` | Tool registration and OData call handlers |
 | `src/ui/` | Config-driven MCP-UI views (lazy-loaded; template rendering, data fetching, tool/resource registration) |
 | `src/config/api-config.json` | All API definitions (destinations, path prefixes, entity sets) |
@@ -96,7 +95,7 @@ Config is Zod-validated at startup; the server exits immediately on invalid conf
 | `LOG_LEVEL` | `info` | `error`/`warn`/`info`/`debug` |
 | `REQUEST_TIMEOUT` | `60000` | ms |
 | `ENABLED_API_CATEGORIES` | all | Comma-separated category filter |
-| `API_CONFIG_FILE` | `api-config.json` | Config file name (relative to `src/config/`) or absolute path; also accepts `btp-admin-api-config.json` |
+| `API_CONFIG_FILE` | `api-config.json` | Config file name or absolute path. A relative name is resolved against the cwd, then the entry-script dir, then the bundled `dist/config/`; also accepts `btp-admin-api-config.json` |
 
 #### Selecting and adding API config files
 

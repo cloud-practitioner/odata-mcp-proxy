@@ -22,10 +22,16 @@
 // =============================================================================
 
 import { randomUUID } from 'node:crypto';
+import { createRequire } from 'node:module';
 import express, { type Express, type Request, type Response, type NextFunction } from 'express';
 import cors from 'cors';
 import { logger } from '../utils/logger.js';
 import { type XsuaaAuth } from '../auth/xsuaa-auth.js';
+
+// Package version, read from package.json so /health stays in sync with releases.
+const { version: packageVersion } = createRequire(import.meta.url)('../../package.json') as {
+  version: string;
+};
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -140,7 +146,7 @@ export function createHttpServer(port: number, auth: XsuaaAuth): Express {
     res.json({
       status: 'ok',
       timestamp: new Date().toISOString(),
-      version: '1.0.0',
+      version: packageVersion,
       oauth: auth.isConfigured(),
     });
   });

@@ -5,8 +5,8 @@ machine for development and testing.
 
 ## Prerequisites
 
-- **Node.js** 20 or later (the project declares `>=18.0.0` but 20+ is
-  recommended for full ESM and `fetch` support)
+- **Node.js** 20 (the project declares `20.x` in `engines`; the SAP
+  `@sap/xsenv` dependency supports up to Node 20)
 - **npm** (ships with Node.js)
 - A **SAP Cloud Integration** tenant with an OAuth2 service key (client
   credentials grant)
@@ -32,24 +32,27 @@ Copy the example environment file and fill in your values:
 cp .env.example .env
 ```
 
-### Required Variables
+### Destination and Credentials
 
-| Variable | Description |
-|---|---|
-| `SAP_DESTINATION_NAME` | A logical name for the destination (e.g. `CPIDestination`). Always required by the config schema. |
+There is **no** `SAP_DESTINATION_NAME` env var. Destination names are defined in
+`src/config/api-config.json` (the `destination` field; the default config uses
+`CPI_DESTINATION`).
 
 ### Local Authentication Variables
 
 When running locally there is no BTP Destination Service available
 (`VCAP_SERVICES` is not set). The server automatically falls back to a direct
-OAuth2 client-credentials flow using these four environment variables:
+OAuth2 client-credentials flow. The env var **prefix** is derived from the
+`destination` field: uppercase it and replace non-alphanumeric characters with
+`_`. For the default `CPI_DESTINATION` destination the prefix is
+`CPI_DESTINATION`, so these four variables are read:
 
 | Variable | Description | Example |
 |---|---|---|
-| `SAP_CPI_BASE_URL` | Base URL of your Cloud Integration tenant | `https://your-tenant.it-cpi018.cfapps.eu10.hana.ondemand.com` |
-| `SAP_CPI_TOKEN_URL` | OAuth2 token endpoint URL | `https://your-tenant.authentication.eu10.hana.ondemand.com/oauth/token` |
-| `SAP_CPI_CLIENT_ID` | OAuth2 client ID from your service key | |
-| `SAP_CPI_CLIENT_SECRET` | OAuth2 client secret from your service key | |
+| `CPI_DESTINATION_BASE_URL` | Base URL of your Cloud Integration tenant | `https://your-tenant.it-cpi018.cfapps.eu10.hana.ondemand.com` |
+| `CPI_DESTINATION_TOKEN_URL` | OAuth2 token endpoint URL | `https://your-tenant.authentication.eu10.hana.ondemand.com/oauth/token` |
+| `CPI_DESTINATION_CLIENT_ID` | OAuth2 client ID from your service key | |
+| `CPI_DESTINATION_CLIENT_SECRET` | OAuth2 client secret from your service key | |
 
 You obtain these values by creating a **service key** for the
 *Process Integration Runtime* service instance in the BTP cockpit (plan
@@ -64,17 +67,19 @@ You obtain these values by creating a **service key** for the
 | `LOG_LEVEL` | `info` | Logging verbosity: `error`, `warn`, `info`, `debug` |
 | `REQUEST_TIMEOUT` | `60000` | HTTP request timeout in milliseconds |
 | `ENABLED_API_CATEGORIES` | `all` | Comma-separated list of API categories (see below) |
+| `API_CONFIG_FILE` | `api-config.json` | Config file name or absolute path (resolved against cwd, then the entry-script dir, then the bundled `dist/config/`) |
+| `CORS_ORIGIN` | -- | Allowed CORS origin; only enforced when `NODE_ENV=production` |
+| `NODE_ENV` | -- | Set to `production` to restrict CORS to `CORS_ORIGIN` (otherwise all origins are reflected) |
 
 ### Example `.env` for Local Development
 
 ```dotenv
-SAP_DESTINATION_NAME=CPIDestination
 MCP_TRANSPORT=stdio
 
-SAP_CPI_BASE_URL=https://your-tenant.it-cpi018.cfapps.eu10.hana.ondemand.com
-SAP_CPI_TOKEN_URL=https://your-tenant.authentication.eu10.hana.ondemand.com/oauth/token
-SAP_CPI_CLIENT_ID=sb-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx!b12345|it!b12345
-SAP_CPI_CLIENT_SECRET=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+CPI_DESTINATION_BASE_URL=https://your-tenant.it-cpi018.cfapps.eu10.hana.ondemand.com
+CPI_DESTINATION_TOKEN_URL=https://your-tenant.authentication.eu10.hana.ondemand.com/oauth/token
+CPI_DESTINATION_CLIENT_ID=sb-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx!b12345|it!b12345
+CPI_DESTINATION_CLIENT_SECRET=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 
 LOG_LEVEL=debug
 ```
@@ -138,9 +143,11 @@ Expected response:
 {
   "status": "ok",
   "timestamp": "2025-01-01T00:00:00.000Z",
-  "version": "1.0.0"
+  "version": "1.3.0"
 }
 ```
+
+(`version` is read from `package.json`, so it tracks the installed release.)
 
 For live-reloading during development:
 
@@ -173,18 +180,13 @@ ENABLED_API_CATEGORIES=integration-content,message-processing-logs,log-files
 
 ## 6. Troubleshooting
 
-### "Configuration validation failed: sapDestinationName"
-
-`SAP_DESTINATION_NAME` is missing or empty. Set it in your `.env` file. The
-value is a logical name used to identify the destination; when running locally
-the actual connection details come from the `SAP_CPI_*` variables.
-
-### "Local fallback: SAP_CPI_BASE_URL environment variable is not set"
+### "Local fallback: CPI_DESTINATION_BASE_URL environment variable is not set"
 
 You are running outside BTP (no `VCAP_SERVICES`) and one or more of the four
-local OAuth2 variables is missing. Make sure `SAP_CPI_BASE_URL`,
-`SAP_CPI_TOKEN_URL`, `SAP_CPI_CLIENT_ID`, and `SAP_CPI_CLIENT_SECRET` are all
-set.
+local OAuth2 variables is missing. Make sure `CPI_DESTINATION_BASE_URL`,
+`CPI_DESTINATION_TOKEN_URL`, `CPI_DESTINATION_CLIENT_ID`, and
+`CPI_DESTINATION_CLIENT_SECRET` are all set (substitute your own destination
+name's prefix if you changed it in `api-config.json`).
 
 ### "OAuth2 token request failed with status 401"
 
@@ -193,7 +195,7 @@ the BTP cockpit and update the values.
 
 ### "OAuth2 token request failed with status 400"
 
-Double-check that `SAP_CPI_TOKEN_URL` points to the correct OAuth2 token
+Double-check that `CPI_DESTINATION_TOKEN_URL` points to the correct OAuth2 token
 endpoint (it should end with `/oauth/token`).
 
 ### Port already in use (EADDRINUSE)
