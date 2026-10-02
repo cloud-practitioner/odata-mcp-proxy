@@ -9,7 +9,7 @@
 // Run `npm run build` first (the `npm test` script does).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -17,25 +17,31 @@ import { createServer } from 'node:net';
 
 const rootDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 const serverEntry = join(rootDir, 'dist', 'index.js');
+const cliEntry = join(rootDir, 'dist', 'cli.js');
 
-function boot(config: unknown, extraEnv: Record<string, string> = {}, timeoutMs = 30_000): { status: number | null; output: string; file: string } {
-  assert.ok(existsSync(serverEntry), 'dist/index.js missing — run `npm run build` first');
+async function boot(config: unknown, extraEnv: Record<string, string> = {}, timeoutMs = 30_000, entry = serverEntry): Promise<{ status: number | null; output: string; stdout: string; stderr: string }> {
+  assert.ok(existsSync(entry), `${entry} missing — run \`npm run build\` first`);
   const dir = mkdtempSync(join(rootDir, '.startup-test-'));
   const file = join(dir, 'api-config.json');
   try {
     writeFileSync(file, JSON.stringify(config));
     const env = { ...(process.env as Record<string, string>) };
     delete env.VCAP_SERVICES;
-    const result = spawnSync(process.execPath, [serverEntry], {
-      cwd: rootDir,
-      env: { ...env, MCP_TRANSPORT: 'stdio', API_CONFIG_FILE: file, LOG_LEVEL: 'error', ...extraEnv },
-      input: '',
-      encoding: 'utf8',
-      timeout: timeoutMs,
+    return await new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, [entry], {
+        cwd: rootDir,
+        env: { ...env, MCP_TRANSPORT: 'stdio', API_CONFIG_FILE: file, LOG_LEVEL: 'error', ...extraEnv },
+        stdio: ['pipe', 'pipe', 'pipe'],
+        timeout: timeoutMs,
+      });
+      // Keep stdin open, as an MCP client would, so EOF cannot mask a failure.
+      let stdout = '';
+      let stderr = '';
+      child.stdout.setEncoding('utf8').on('data', (chunk) => { stdout += chunk; });
+      child.stderr.setEncoding('utf8').on('data', (chunk) => { stderr += chunk; });
+      child.on('error', reject);
+      child.on('close', (status) => resolve({ status, output: `${stdout}${stderr}`, stdout, stderr }));
     });
-    // The failure is reported on whichever stream the process used before exit;
-    // combine both so the assertions do not depend on that detail.
-    return { status: result.status, output: `${result.stdout}${result.stderr}`, file };
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -52,25 +58,45 @@ const categorisedConfig = {
   }],
 };
 
-test('an unknown ENABLED_API_CATEGORIES value fails startup instead of registering nothing (F12)', () => {
-  const { status, output } = boot(categorisedConfig, { ENABLED_API_CATEGORIES: 'bogus' });
-  assert.notEqual(status, 0);
-  assert.ok(output.includes('ENABLED_API_CATEGORIES references categor'), output);
-  assert.ok(output.includes('bogus'), output);
-  assert.ok(output.includes('monitoring'), output);
-});
+const unknownApiConfig = {
+  server: { name: 's' },
+  apis: [{
+    name: 'a',
+    destination: 'DEST',
+    entitySets: [{ entitySet: 'E1', keys: [{ name: 'Id', type: 'string' }], operations: { list: true } }],
+  }],
+  ui: [{ tool: 'UI_X', uri: 'ui://x', template: 't.html', data: { src: { api: 'nope', path: '/x' } } }],
+};
 
-test('a known ENABLED_API_CATEGORIES value does not trip the check (F12)', () => {
+for (const entry of [serverEntry, cliEntry]) {
+  test(`an unknown ENABLED_API_CATEGORIES value fails startup instead of registering nothing (F12, ${entry})`, async () => {
+    const { status, output, stdout, stderr } = await boot(categorisedConfig, { ENABLED_API_CATEGORIES: 'bogus' }, 30_000, entry);
+    assert.equal(status, 1, output);
+    assert.equal(stdout, '', output);
+    assert.ok(stderr.includes('ENABLED_API_CATEGORIES references categor'), output);
+    assert.ok(stderr.includes('bogus'), output);
+    assert.ok(stderr.includes('monitoring'), output);
+  });
+
+  test(`a UI view referencing an unknown api fails stdio startup (F10, ${entry})`, async () => {
+    const { status, output, stdout, stderr } = await boot(unknownApiConfig, { ENABLED_API_CATEGORIES: 'all' }, 30_000, entry);
+    assert.equal(status, 1, output);
+    assert.equal(stdout, '', output);
+    assert.ok(stderr.includes('references unknown api "nope"'), output);
+  });
+}
+
+test('a known ENABLED_API_CATEGORIES value does not trip the check (F12)', async () => {
   // With a valid category the server reaches the "running on stdio transport"
   // log and then blocks on stdin; a short timeout kills it afterwards. Seeing
   // that log proves it got past both the category check and the startup
   // self-check without rejecting a valid config.
-  const { output } = boot(categorisedConfig, { ENABLED_API_CATEGORIES: 'monitoring', LOG_LEVEL: 'info' }, 10_000);
+  const { output } = await boot(categorisedConfig, { ENABLED_API_CATEGORIES: 'monitoring', LOG_LEVEL: 'info' }, 10_000);
   assert.ok(output.includes('running on stdio transport'), output);
   assert.ok(!output.includes('ENABLED_API_CATEGORIES references'), output);
 });
 
-test('startup accepts duplicate entity names when only one category is enabled (F10)', () => {
+test('startup accepts duplicate entity names when only one category is enabled (F10)', async () => {
   const config = {
     ...categorisedConfig,
     apis: [
@@ -81,7 +107,7 @@ test('startup accepts duplicate entity names when only one category is enabled (
       },
     ],
   };
-  const { output } = boot(config, { ENABLED_API_CATEGORIES: 'monitoring', LOG_LEVEL: 'info' }, 10_000);
+  const { output } = await boot(config, { ENABLED_API_CATEGORIES: 'monitoring', LOG_LEVEL: 'info' }, 10_000);
   assert.ok(output.includes('running on stdio transport'), output);
   assert.ok(!output.includes('duplicate tool name'), output);
 });
@@ -94,16 +120,7 @@ test('a UI view referencing an unknown api fails HTTP startup before listening (
   const port = address.port;
   await new Promise<void>((resolve, reject) => probe.close((error) => error ? reject(error) : resolve()));
 
-  const config = {
-    server: { name: 's' },
-    apis: [{
-      name: 'a',
-      destination: 'DEST',
-      entitySets: [{ entitySet: 'E1', keys: [{ name: 'Id', type: 'string' }], operations: { list: true } }],
-    }],
-    ui: [{ tool: 'UI_X', uri: 'ui://x', template: 't.html', data: { src: { api: 'nope', path: '/x' } } }],
-  };
-  const { status, output } = boot(config, {
+  const { status, output } = await boot(unknownApiConfig, {
     MCP_TRANSPORT: 'http', PORT: String(port), LOG_LEVEL: 'info', ENABLED_API_CATEGORIES: 'all',
   });
   assert.equal(status, 1, output);

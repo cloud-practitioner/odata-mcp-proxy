@@ -15,5 +15,10 @@ if (configIdx !== -1 && args[configIdx + 1]) {
 }
 
 // Import lazily so --config takes effect before the config module loads.
-const { start } = await import('./index.js');
-await start();
+try {
+  const { start } = await import('./index.js');
+  await start();
+} catch (error) {
+  console.error(error instanceof Error ? error.message : String(error));
+  process.exitCode = 1;
+}
