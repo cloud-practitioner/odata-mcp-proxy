@@ -689,7 +689,7 @@ Tool results are decoded from the raw response bytes:
 { "contentType": "application/zip", "encoding": "base64", "size": 21605, "data": "UEsDBBQACAgI..." }
 ```
 
-The `data` value can be passed unchanged as base64 content (e.g. `ArtifactContent`) to a `_create` or `_update` call, which is how an artifact is copied.
+The `data` value can be passed unchanged as base64 content (e.g. `ArtifactContent`) to a `_create` or `_update` call, which is how an artifact is copied. For HTTP uploads, see the [request body limit](#http-streamable-http).
 
 ---
 
@@ -703,13 +703,17 @@ Each `initialize` returns a fresh server-generated UUID in the `mcp-session-id` 
 
 Non-initialize requests with an unknown session ID return HTTP 404; initialize again to obtain a new ID. `GET /mcp` and `DELETE /mcp` without a `mcp-session-id` header return HTTP 400 instead.
 
+JSON request bodies on `/mcp` have a fixed **50 MiB** (`50mb`) limit, including base64 content and the JSON-RPC envelope, not just the raw artifact bytes. When XSUAA is bound, authentication runs before body parsing (see [Operation Scopes](#operation-scopes)). An oversized MCP JSON body returns HTTP `413` with a JSON-RPC error (`code: -32600`, `id: null`) explaining the limit, rather than an HTML error page. Allowed CORS origins can read this error response.
+
+Public and unmatched routes retain Express's default 100 KiB JSON body limit. Malformed JSON and URL-encoded parser errors retain Express's normal error responses; they are not converted to JSON-RPC errors.
+
 ```bash
 MCP_TRANSPORT=http PORT=4004 npm start
 ```
 
 ### stdio
 
-Used for local development and direct integration with Claude Desktop. Communication happens over standard input/output streams; stdout carries only MCP messages, and all log output goes to stderr.
+Used for local development and direct integration with Claude Desktop. Communication happens over standard input/output streams; stdout carries only MCP messages, and all log output, including SAP Cloud SDK logs, goes to stderr.
 
 ```bash
 MCP_TRANSPORT=stdio npm start

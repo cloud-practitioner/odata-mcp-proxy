@@ -91,9 +91,9 @@ export function createHttpServer(port: number, auth: XsuaaAuth): Express {
   // ---------------------------------------------------------------------------
   // JWT extraction / optional XSUAA validation
   //
-  // Attaches req.auth (for the MCP SDK) and req.jwtToken when a valid Bearer
-  // token is present. When XSUAA is configured the token is validated; invalid
-  // tokens are silently dropped so local / stdio development still works.
+  // Keep authentication before route-scoped upload parsing so unauthenticated
+  // callers cannot force large-body buffering when XSUAA is bound. See
+  // XsuaaAuth.requireAuth() for token rejection and request token attachment.
   // ---------------------------------------------------------------------------
   app.use('/mcp', auth.requireAuth() as unknown as (req: Request, res: Response, next: NextFunction) => void);
 
