@@ -185,7 +185,7 @@ async function navigationDecisions(def: EntitySetDefinition, token: string) {
     }
   }
   await server.close();
-  return { allowed, registered: names.has(NAV_TOOL) };
+  return { allowed };
 }
 
 test('XSUAA: the navigation tool refuses a token without the read scope', async () => {
