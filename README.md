@@ -46,7 +46,7 @@ The server resolves a BTP Destination at startup to obtain the Cloud Integration
 
 ## Prerequisites
 
-- **Node.js** 22.x
+- **Node.js** 22.x (see `engines.node` in [package.json](package.json))
 - **SAP BTP account** with a Cloud Foundry environment
 - **SAP Integration Suite** tenant (Cloud Integration capability)
 - **BTP Destination** configured to point to your Cloud Integration tenant's OData API with OAuth2 authentication
@@ -748,7 +748,7 @@ MCP_TRANSPORT=stdio npm start
 
 ## Tech Stack
 
-- **Runtime:** Node.js 22 with ES Modules
+- **Runtime:** Node.js with ES Modules (see [prerequisites](#prerequisites))
 - **Language:** TypeScript 5.7+
 - **MCP SDK:** `@modelcontextprotocol/sdk` (resolved version in [package-lock.json](package-lock.json))
 - **SAP Cloud SDK:** `@sap-cloud-sdk/connectivity` and `@sap-cloud-sdk/http-client` 4.x for destination resolution and HTTP calls

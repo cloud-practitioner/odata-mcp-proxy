@@ -5,8 +5,7 @@ machine for development and testing.
 
 ## Prerequisites
 
-- **Node.js** 22 (the project declares `22.x` in `engines`, matching the
-  default of the Cloud Foundry Node.js buildpack)
+- **Node.js** installed per the [README prerequisites](../README.md#prerequisites)
 - **npm** (ships with Node.js)
 - A **SAP Cloud Integration** tenant with an OAuth2 service key (client
   credentials grant)
