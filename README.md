@@ -748,7 +748,7 @@ MCP_TRANSPORT=stdio npm start
 
 ## Tech Stack
 
-- **Runtime:** Node.js 20+ with ES Modules
+- **Runtime:** Node.js 22 with ES Modules
 - **Language:** TypeScript 5.7+
 - **MCP SDK:** `@modelcontextprotocol/sdk` (resolved version in [package-lock.json](package-lock.json))
 - **SAP Cloud SDK:** `@sap-cloud-sdk/connectivity` and `@sap-cloud-sdk/http-client` 4.x for destination resolution and HTTP calls

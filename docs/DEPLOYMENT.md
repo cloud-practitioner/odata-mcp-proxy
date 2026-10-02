@@ -13,7 +13,7 @@ Before you begin, make sure the following are in place:
   ```bash
   npm install -g mbt
   ```
-- **Node.js 20** installed (see `engines` in `package.json`; `@sap/xsenv` supports up to Node 20).
+- **Node.js 22** installed (see `engines` in `package.json`; matches the Cloud Foundry Node.js buildpack default).
 - **SAP Integration Suite** subscription in your subaccount with the **Cloud Integration** capability activated.
 - **Process Integration Runtime** service instance (plan: **api**) with the required authorization roles (see next section).
 

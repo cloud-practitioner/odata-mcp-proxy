@@ -5,8 +5,8 @@ machine for development and testing.
 
 ## Prerequisites
 
-- **Node.js** 20 (the project declares `20.x` in `engines`; the SAP
-  `@sap/xsenv` dependency supports up to Node 20)
+- **Node.js** 22 (the project declares `22.x` in `engines`, matching the
+  default of the Cloud Foundry Node.js buildpack)
 - **npm** (ships with Node.js)
 - A **SAP Cloud Integration** tenant with an OAuth2 service key (client
   credentials grant)
