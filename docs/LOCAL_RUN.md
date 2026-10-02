@@ -21,14 +21,8 @@ npm install
 
 ## 2. Build
 
-The project is written in TypeScript. Compile it before running:
-
-```bash
-npm run build
-```
-
-This outputs JavaScript to the `dist/` directory. The entry point is
-`dist/index.js`.
+See the README for [installation-time builds](../README.md#using-as-an-npm-package)
+and [rebuilding after source changes](../README.md#3-build-and-run).
 
 ## 3. Environment Setup
 
