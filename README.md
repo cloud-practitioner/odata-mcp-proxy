@@ -82,7 +82,7 @@ MCP_TRANSPORT=stdio
 ### 3. Build and run
 
 ```bash
-npm run build
+npm run build        # Rebuild after source edits or an install with scripts disabled
 npm run start:stdio
 ```
 
@@ -116,7 +116,9 @@ Add the server to your Claude Desktop MCP configuration (`claude_desktop_config.
 
 ## Using as an npm Package
 
-You can consume `odata-mcp-proxy` as a dependency in your own project -- similar to how the [SAP Application Router](https://www.npmjs.com/package/@sap/approuter) works. No TypeScript compilation or build step required.
+You can consume `odata-mcp-proxy` as a dependency in your own project -- similar to how the [SAP Application Router](https://www.npmjs.com/package/@sap/approuter) works. Registry releases include prebuilt `dist/` output, so consumers need no manual build step.
+
+For Git dependencies and source checkout installs, npm's `prepare` hook runs `npm run build` when `src/` exists, generating `dist/` automatically. Keep npm lifecycle scripts enabled; source checkout builds also need the development dependencies. When `src/` is absent, as in a published package or standalone Cloud Foundry staging, the hook skips compilation and uses the prebuilt output.
 
 ### 1. Create your project
 
