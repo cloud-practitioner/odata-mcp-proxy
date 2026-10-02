@@ -1,52 +1,39 @@
-// =============================================================================
-// Regression tests for the OAuth / inbound-auth security findings (fork scan
-// F1, F2, F17), reproduced against the built HTTP server after adopting
-// `@arc-mcp/xsuaa-auth` (upstream PR #5).
-//
-// Each test is the reproduction from the fork-scan report (section 8,
-// `.scratch/repro-oauth.ts`) turned into an assertion that the vulnerability no
-// longer reproduces. The server is booted with a FAKE XSUAA binding pointing at
-// a local stub — no real tenant or secret is used.
-//
-//   F1  — unauthenticated DCR must not echo the bound XSUAA client_secret.
-//   F2  — OAuth proxy: no open redirect; token endpoint requires client auth;
-//         PKCE S256 is enforced (challenge forwarded to XSUAA at authorize).
-//   F17 — callback error page escapes input (no reflected XSS); OAuth codes /
-//         refresh tokens are redacted from the request log; discovery metadata
-//         is built from a configured base URL, not the request Host header.
-// =============================================================================
-
 import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'node:http';
+import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { spawn, type ChildProcess } from 'node:child_process';
+import { createHash, randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { existsSync } from 'node:fs';
+import { createHttpServer, isXsuaaConfigured } from '../src/server/http.js';
+import { OAuthStateCodec } from '@arc-mcp/xsuaa-auth';
 
 const rootDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 const serverEntry = join(rootDir, 'dist', 'index.js');
 const configPath = join(rootDir, 'test', 'fixtures', 'e2e-config.json');
-
 const FAKE_SECRET = 'fake-secret-for-repro';
-
-// Records bodies POSTed to the fake XSUAA /oauth/token — used to prove the proxy
-// never forwarded its own client_secret for an unauthenticated token redemption.
+const CLIENT_ID = 'sb-fake!t1';
+const REDIRECT_URI = 'http://localhost:4004/oauth/callback';
+const VERIFIER = 'v'.repeat(64);
+const challenge = (verifier: string) => createHash('sha256').update(verifier).digest('base64url');
 const tokenRequests: string[] = [];
-
+const revokedTokens: string[] = [];
+const codes = new Map<string, { challenge: string; redirectUri: string }>();
+const refreshTokens = new Set<string>();
 let xsuaa: Server;
 let xsuaaUrl: string;
 let child: ChildProcess;
 let url: string;
+let serverLogs = '';
 let discovery: {
   authorization_endpoint: string;
   token_endpoint: string;
   registration_endpoint: string;
+  revocation_endpoint: string;
   code_challenge_methods_supported?: string[];
 };
-// Accumulated server stdout+stderr, scanned by the token-logging test (F17).
-let serverLogs = '';
 
 async function freePort(): Promise<number> {
   const probe = createServer();
@@ -57,77 +44,104 @@ async function freePort(): Promise<number> {
 }
 
 before(async () => {
-  assert.ok(existsSync(serverEntry), 'dist/index.js missing — run `npm run build` first');
-
-  // Fake XSUAA: records token POSTs, hands back a token for any request. It does
-  // NOT enforce PKCE/client auth — the point is that our proxy rejects the
-  // attack BEFORE it ever reaches here.
-  xsuaa = createServer((req: IncomingMessage, res: ServerResponse) => {
+  assert.ok(existsSync(serverEntry), 'dist/index.js missing — run npm run build first');
+  xsuaa = createServer((req, res) => {
+    const target = new URL(req.url ?? '/', 'http://stub');
+    if (target.pathname === '/oauth/authorize') {
+      const code = randomUUID();
+      codes.set(code, {
+        challenge: target.searchParams.get('code_challenge') ?? '',
+        redirectUri: target.searchParams.get('redirect_uri') ?? '',
+      });
+      const callback = new URL(target.searchParams.get('redirect_uri')!);
+      callback.searchParams.set('code', code);
+      callback.searchParams.set('state', target.searchParams.get('state')!);
+      res.writeHead(302, { location: callback.toString() });
+      res.end();
+      return;
+    }
     let body = '';
-    req.on('data', (c) => { body += c; });
+    req.on('data', (chunk) => { body += chunk; });
     req.on('end', () => {
-      if ((req.url ?? '').startsWith('/oauth/token')) {
-        tokenRequests.push(body);
-        res.writeHead(200, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({
-          access_token: 'victim-access-token',
-          refresh_token: 'victim-refresh-token',
-          token_type: 'bearer',
-        }));
+      const params = new URLSearchParams(body);
+      if (target.pathname === '/oauth/revoke') {
+        revokedTokens.push(params.get('token') ?? '');
+        refreshTokens.delete(params.get('token') ?? '');
+        res.writeHead(200);
+        res.end();
         return;
       }
-      res.writeHead(404);
-      res.end();
+      if (target.pathname !== '/oauth/token') {
+        res.writeHead(404);
+        res.end();
+        return;
+      }
+      tokenRequests.push(body);
+      let valid = params.get('client_id') === CLIENT_ID && params.get('client_secret') === FAKE_SECRET;
+      if (params.get('grant_type') === 'authorization_code') {
+        const code = params.get('code') ?? '';
+        const grant = codes.get(code);
+        const verifier = params.get('code_verifier');
+        valid = valid && !!grant && !!verifier && challenge(verifier) === grant.challenge &&
+          params.get('redirect_uri') === grant.redirectUri;
+        if (valid) codes.delete(code);
+      } else if (params.get('grant_type') === 'refresh_token') {
+        const token = params.get('refresh_token') ?? '';
+        valid = valid && refreshTokens.has(token);
+        if (valid) refreshTokens.delete(token);
+      } else {
+        valid = false;
+      }
+      res.writeHead(valid ? 200 : 400, { 'content-type': 'application/json' });
+      if (!valid) {
+        res.end(JSON.stringify({ error: 'invalid_grant' }));
+        return;
+      }
+      const refreshToken = randomUUID();
+      refreshTokens.add(refreshToken);
+      res.end(JSON.stringify({
+        access_token: 'victim-access-token',
+        refresh_token: refreshToken,
+        token_type: 'bearer',
+      }));
     });
   });
   await new Promise<void>((resolve) => xsuaa.listen(0, '127.0.0.1', resolve));
   xsuaaUrl = `http://127.0.0.1:${(xsuaa.address() as AddressInfo).port}`;
-
   const port = await freePort();
-  const vcap = {
-    xsuaa: [{
-      label: 'xsuaa',
-      name: 'x',
-      tags: ['xsuaa'],
-      credentials: {
-        clientid: 'sb-fake!t1',
-        clientsecret: FAKE_SECRET,
-        url: xsuaaUrl,
-        uaadomain: '127.0.0.1',
-        xsappname: 'fake',
-      },
-    }],
-  };
-  const env = {
-    ...(process.env as Record<string, string>),
-    MCP_TRANSPORT: 'http',
-    PORT: String(port),
-    // info level so the request logger actually emits — the F17 test asserts the
-    // path is logged while the query string (code / refresh_token) is redacted.
-    LOG_LEVEL: 'info',
-    VCAP_SERVICES: JSON.stringify(vcap),
-    API_CONFIG_FILE: configPath,
-  };
-  // Ensure no reverse-proxy override leaks in from the ambient env.
-  delete (env as Record<string, string>).PUBLIC_BASE_URL;
-
-  child = spawn(process.execPath, [serverEntry], { cwd: rootDir, env, stdio: ['ignore', 'pipe', 'pipe'] });
-  child.stdout?.on('data', (c: Buffer) => { serverLogs += c.toString('utf8'); });
-  child.stderr?.on('data', (c: Buffer) => { serverLogs += c.toString('utf8'); });
-
   url = `http://127.0.0.1:${port}`;
+  const vcap = { xsuaa: [{ credentials: {
+    clientid: CLIENT_ID,
+    clientsecret: FAKE_SECRET,
+    url: xsuaaUrl,
+    uaadomain: '127.0.0.1',
+    xsappname: 'fake',
+  } }] };
+  child = spawn(process.execPath, [serverEntry], {
+    cwd: rootDir,
+    env: {
+      ...process.env,
+      MCP_TRANSPORT: 'http', PORT: String(port), LOG_LEVEL: 'info',
+      VCAP_SERVICES: JSON.stringify(vcap), API_CONFIG_FILE: configPath,
+      PUBLIC_BASE_URL: url,
+      VCAP_APPLICATION: JSON.stringify({ application_uris: ['external.example'] }),
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  child.stdout?.on('data', (chunk: Buffer) => { serverLogs += chunk.toString('utf8'); });
+  child.stderr?.on('data', (chunk: Buffer) => { serverLogs += chunk.toString('utf8'); });
   const deadline = Date.now() + 15_000;
   for (;;) {
-    if (child.exitCode !== null) throw new Error(`server exited with ${child.exitCode}: ${serverLogs}`);
+    if (child.exitCode !== null) throw new Error(`server exited: ${serverLogs}`);
     try { if ((await fetch(`${url}/health`)).ok) break; } catch { /* starting */ }
     if (Date.now() > deadline) { child.kill(); throw new Error(`server not healthy: ${serverLogs}`); }
-    await new Promise((r) => setTimeout(r, 100));
+    await new Promise((resolve) => setTimeout(resolve, 100));
   }
-
-  const health = await (await fetch(`${url}/health`)).json() as { oauth: boolean };
-  assert.equal(health.oauth, true, 'the fake binding must enable the XSUAA OAuth proxy');
-
-  discovery = await (await fetch(`${url}/.well-known/oauth-authorization-server`)).json() as typeof discovery;
+  assert.equal((await (await fetch(`${url}/health`)).json()).oauth, true);
+  discovery = await (await fetch(`${url}/.well-known/oauth-authorization-server`)).json();
+  for (const endpoint of [discovery.authorization_endpoint, discovery.token_endpoint, discovery.registration_endpoint]) {
+    assert.equal(new URL(endpoint).origin, url);
+  }
 });
 
 after(async () => {
@@ -136,143 +150,271 @@ after(async () => {
     child.kill('SIGTERM');
     await exited;
   }
-  xsuaa?.close();
+  await new Promise<void>((resolve) => xsuaa?.close(() => resolve()));
 });
 
-/** Register a public (PKCE, no secret) DCR client and return its client_id. */
-async function registerClient(redirectUri = 'http://localhost:3000/oauth/callback'): Promise<{
-  client_id: string;
-  client_secret?: string;
-  status: number;
-}> {
-  const res = await fetch(discovery.registration_endpoint, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ redirect_uris: [redirectUri], token_endpoint_auth_method: 'none' }),
+async function registerClient(method = 'none', redirectUri = REDIRECT_URI) {
+  const response = await fetch(discovery.registration_endpoint, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ redirect_uris: [redirectUri], token_endpoint_auth_method: method, client_name: randomUUID() }),
   });
-  const body = await res.json().catch(() => ({})) as { client_id: string; client_secret?: string };
-  return { ...body, status: res.status };
+  const body = await response.json() as { client_id: string; client_secret?: string };
+  return { ...body, status: response.status };
 }
 
-// ─── F1 — DCR must not leak the XSUAA client secret ───────────────────────────
-
-test('F1: the legacy unauthenticated DCR path no longer exists', async () => {
-  // The old fork exposed POST /oauth/client-registration which echoed the bound
-  // XSUAA client_secret. It is gone (the SDK router owns registration).
-  const res = await fetch(`${url}/oauth/client-registration`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: '{}',
+async function authorize(clientId: string, method = 'GET', redirectUri = REDIRECT_URI) {
+  const params = new URLSearchParams({
+    client_id: clientId, response_type: 'code', redirect_uri: redirectUri,
+    code_challenge: challenge(VERIFIER), code_challenge_method: 'S256', state: 'client+state',
   });
-  assert.equal(res.status, 404, 'the secret-echoing /oauth/client-registration route must not exist');
-});
-
-test('F1: dynamic client registration does not return the bound XSUAA client_secret', async () => {
-  const reg = await registerClient();
-  assert.equal(reg.status, 201, 'DCR should succeed for an allowlisted redirect_uri');
-  // Stateless HMAC client id, not the XSUAA service-binding client id.
-  assert.ok(reg.client_id.startsWith('mcp-'), `expected an HMAC client id, got ${reg.client_id}`);
-  assert.notEqual(reg.client_id, 'sb-fake!t1');
-  // The response must NEVER carry the bound XSUAA secret. A public client gets
-  // no secret at all; a confidential one would get a value DERIVED from its own
-  // client_id — in neither case the XSUAA client_secret.
-  assert.notEqual(reg.client_secret, FAKE_SECRET, 'DCR must not echo the XSUAA client_secret');
-});
-
-// ─── F2 — open redirect + token redemption with no client auth / no PKCE ──────
-
-test('F2: /authorize rejects an arbitrary (off-allowlist) redirect_uri', async () => {
-  const reg = await registerClient();
-  const q = new URLSearchParams({
-    client_id: reg.client_id,
-    response_type: 'code',
-    redirect_uri: 'https://attacker.example/cb',
-    code_challenge: 'CHAL123',
-    code_challenge_method: 'S256',
-    state: 's1',
+  return fetch(`${discovery.authorization_endpoint}${method === 'GET' ? `?${params}` : ''}`, {
+    method, redirect: 'manual',
+    ...(method === 'POST' ? {
+      headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: params,
+    } : {}),
   });
-  const res = await fetch(`${url}/authorize?${q}`, { redirect: 'manual' });
-  assert.equal(res.status, 400, 'an unregistered attacker redirect_uri must be rejected, not forwarded');
-  assert.equal(res.headers.get('location'), null, 'no redirect may be issued for a rejected redirect_uri');
-});
+}
 
-test('F2: /authorize forwards the PKCE S256 challenge to XSUAA via the server callback and a signed state', async () => {
-  const reg = await registerClient();
-  const q = new URLSearchParams({
-    client_id: reg.client_id,
-    response_type: 'code',
-    redirect_uri: 'http://localhost:3000/oauth/callback',
-    code_challenge: 'CHAL123',
-    code_challenge_method: 'S256',
-    state: 'clientstate',
-  });
-  const res = await fetch(`${url}/authorize?${q}`, { redirect: 'manual' });
-  assert.equal(res.status, 302);
-  const location = res.headers.get('location');
-  assert.ok(location, 'authorize must redirect to XSUAA');
-  const target = new URL(location!);
-  // Redirect goes to the real authorization server (XSUAA), not the client/attacker.
-  assert.equal(target.origin, xsuaaUrl, 'authorize must redirect to XSUAA');
-  // PKCE: the client challenge is forwarded as S256, so XSUAA enforces the
-  // code_verifier check at token exchange (the proxy is stateless by design).
-  assert.equal(target.searchParams.get('code_challenge'), 'CHAL123');
+async function issueCode(clientId: string, method = 'GET') {
+  const response = await authorize(clientId, method);
+  assert.equal(response.status, 302);
+  const target = new URL(response.headers.get('location')!);
+  assert.equal(target.origin, xsuaaUrl);
+  assert.equal(target.searchParams.get('code_challenge'), challenge(VERIFIER));
   assert.equal(target.searchParams.get('code_challenge_method'), 'S256');
-  // Open-redirect defence: XSUAA is sent the SERVER's own callback, and the
-  // client's redirect_uri + state ride inside an opaque signed state token.
-  assert.match(target.searchParams.get('redirect_uri') ?? '', /\/oauth\/callback$/);
-  assert.notEqual(target.searchParams.get('state'), 'clientstate', 'state must be an opaque signed token');
-  // Discovery still advertises S256, now truthfully enforced end-to-end.
+  assert.equal(target.searchParams.get('redirect_uri'), `${url}/oauth/callback`);
+  const upstreamResponse = await fetch(target, { redirect: 'manual' });
+  const callbackUrl = upstreamResponse.headers.get('location')!;
+  const rawCode = new URL(callbackUrl).searchParams.get('code')!;
+  const callback = await fetch(callbackUrl, { redirect: 'manual' });
+  assert.equal(callback.status, 302);
+  const clientTarget = new URL(callback.headers.get('location')!);
+  assert.equal(clientTarget.origin, new URL(REDIRECT_URI).origin);
+  assert.equal(clientTarget.searchParams.get('state'), 'client+state');
+  return { code: clientTarget.searchParams.get('code')!, rawCode, callbackUrl };
+}
+
+async function token(params: Record<string, string>) {
+  return fetch(discovery.token_endpoint, {
+    method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams(params),
+  });
+}
+
+function withEnv(values: Record<string, string | undefined>, action: () => void) {
+  const previous = Object.fromEntries(Object.keys(values).map((key) => [key, process.env[key]]));
+  try {
+    for (const [key, value] of Object.entries(values)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    action();
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+test('R1: absent bindings stay open; malformed and incomplete bindings fail closed at both entry points', () => {
+  for (const binding of [undefined, '{}', '{"destination":[]}', '{"xsuaa":[]}']) {
+    withEnv({ VCAP_SERVICES: binding }, () => {
+      assert.equal(isXsuaaConfigured(), false);
+      const app = createHttpServer(4004);
+      assert.ok(app);
+    });
+  }
+  const credentials = { url: xsuaaUrl, clientid: CLIENT_ID, clientsecret: FAKE_SECRET, xsappname: 'fake', uaadomain: '127.0.0.1' };
+  const invalid = ['', 'not-json', 'null', '[]', '{"xsuaa":null}', '{"xsuaa":[{}]}'];
+  for (const key of Object.keys(credentials)) {
+    invalid.push(JSON.stringify({ xsuaa: [{ credentials: { ...credentials, [key]: undefined } }] }));
+  }
+  for (const binding of invalid) {
+    withEnv({ VCAP_SERVICES: binding }, () => {
+      assert.throws(() => isXsuaaConfigured());
+      assert.throws(() => createHttpServer(4004));
+    });
+  }
+  withEnv({ VCAP_SERVICES: JSON.stringify({ xsuaa: [{ credentials }] }), PUBLIC_BASE_URL: url }, () => {
+    assert.equal(isXsuaaConfigured(), true);
+    assert.ok(createHttpServer(4004));
+  });
+});
+
+test('R6: public URLs with a base path, query, fragment, credentials, or non-HTTP scheme are refused', () => {
+  const credentials = { url: xsuaaUrl, clientid: CLIENT_ID, clientsecret: FAKE_SECRET, xsappname: 'fake', uaadomain: '127.0.0.1' };
+  for (const publicUrl of ['https://proxy.example/base', 'https://proxy.example/?query=1', 'https://proxy.example/#frag', 'https://user@proxy.example', 'ftp://proxy.example']) {
+    withEnv({ VCAP_SERVICES: JSON.stringify({ xsuaa: [{ credentials }] }), PUBLIC_BASE_URL: publicUrl }, () => {
+      assert.throws(() => createHttpServer(4004), /HTTP\(S\) origin/);
+    });
+  }
+});
+
+test('F1: unauthenticated DCR does not expose the XSUAA secret for public or confidential clients', async () => {
+  const legacy = await fetch(`${url}/oauth/client-registration`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+  assert.equal(legacy.status, 404);
+  for (const method of ['none', 'client_secret_post']) {
+    const client = await registerClient(method);
+    assert.equal(client.status, 201);
+    assert.ok(client.client_id.startsWith('mcp-'));
+    assert.notEqual(client.client_id, CLIENT_ID);
+    assert.notEqual(client.client_secret, FAKE_SECRET);
+    if (method === 'none') assert.equal(client.client_secret, undefined);
+    else assert.ok(client.client_secret);
+  }
+});
+
+test('F2/R5: unconfigured manual-client callbacks are rejected for authorize GET/POST and DCR', async () => {
+  for (const redirectUri of ['https://attacker.example/cb', 'https://callback.mistral.ai/v1/integrations_auth/oauth2_callback']) {
+    for (const method of ['GET', 'POST']) {
+      const response = await authorize(CLIENT_ID, method, redirectUri);
+      assert.equal(response.status, 400);
+      assert.equal(response.headers.get('location'), null);
+    }
+    assert.equal((await registerClient('none', redirectUri)).status, 400);
+  }
+  await issueCode(CLIENT_ID, 'POST');
+});
+
+test('R5: valid signed callback states cannot bypass redirect policy on success or error', async () => {
+  const codec = new OAuthStateCodec(FAKE_SECRET);
+  const state = codec.encode({
+    clientId: CLIENT_ID,
+    clientRedirectUri: 'https://callback.mistral.ai/v1/integrations_auth/oauth2_callback',
+    clientState: JSON.stringify({ challenge: challenge(VERIFIER), state: 'clientstate' }),
+  });
+  for (const reply of [{ code: 'CODE123' }, { error: 'access_denied' }]) {
+    const params = new URLSearchParams({ state, ...reply });
+    const response = await fetch(`${url}/oauth/callback?${params}`, { redirect: 'manual' });
+    assert.equal(response.status, 400);
+    assert.equal(response.headers.get('location'), null);
+  }
+});
+
+test('F2: forged callback state never forwards an authorization code', async () => {
+  const response = await fetch(`${url}/oauth/callback?code=CODE123&state=forged`, { redirect: 'manual' });
+  assert.equal(response.status, 400);
+  assert.equal(response.headers.get('location'), null);
+});
+
+test('F2: public code exchange rejects missing/mismatched PKCE and another client before contacting XSUAA', async () => {
+  const client = await registerClient();
+  const other = await registerClient();
+  const grant = await issueCode(client.client_id);
+  for (const params of [
+    { client_id: client.client_id },
+    { client_id: client.client_id, code_verifier: 'wrong'.repeat(16) },
+    { client_id: other.client_id, code_verifier: VERIFIER },
+    { client_id: client.client_id, code_verifier: VERIFIER, redirect_uri: 'http://localhost:4004/wrong' },
+  ]) {
+    const count = tokenRequests.length;
+    const response = await token({ grant_type: 'authorization_code', code: grant.code, ...params });
+    assert.equal(response.status, 400);
+    assert.equal(tokenRequests.length, count);
+  }
+  const count = tokenRequests.length;
+  assert.equal((await token({ grant_type: 'authorization_code', code: grant.rawCode, client_id: client.client_id, code_verifier: VERIFIER })).status, 400);
+  assert.equal(tokenRequests.length, count);
+  const response = await token({ grant_type: 'authorization_code', code: grant.code, client_id: client.client_id, code_verifier: VERIFIER });
+  assert.equal(response.status, 200);
+  assert.equal(tokenRequests.length, count + 1);
+  const upstream = new URLSearchParams(tokenRequests.at(-1));
+  assert.equal(upstream.get('code'), grant.rawCode);
+  assert.equal(upstream.get('code_verifier'), VERIFIER);
   assert.deepEqual(discovery.code_challenge_methods_supported, ['S256']);
 });
 
-test('F2: /oauth/callback does not forward a code to an attacker on a forged state', async () => {
-  const res = await fetch(`${url}/oauth/callback?code=CODE123&state=forged`, { redirect: 'manual' });
-  assert.equal(res.status, 400, 'an unverifiable state must fail closed, not 302 the code onward');
-  assert.equal(res.headers.get('location'), null, 'no code may be forwarded for a forged state');
+test('F2: confidential clients must authenticate and still satisfy PKCE', async () => {
+  const client = await registerClient('client_secret_post');
+  const grant = await issueCode(client.client_id, 'POST');
+  for (const secret of [undefined, 'wrong-secret']) {
+    const count = tokenRequests.length;
+    const response = await token({ grant_type: 'authorization_code', code: grant.code, client_id: client.client_id, code_verifier: VERIFIER, ...(secret ? { client_secret: secret } : {}) });
+    assert.equal(response.status, 400);
+    assert.equal(tokenRequests.length, count);
+  }
+  const count = tokenRequests.length;
+  assert.equal((await token({ grant_type: 'authorization_code', code: grant.code, client_id: client.client_id, client_secret: client.client_secret!, code_verifier: 'bad'.repeat(22) })).status, 400);
+  assert.equal(tokenRequests.length, count);
+  assert.equal((await token({ grant_type: 'authorization_code', code: grant.code, client_id: client.client_id, client_secret: client.client_secret!, code_verifier: VERIFIER })).status, 200);
 });
 
-test('F2: the token endpoint rejects code redemption with no client authentication', async () => {
-  tokenRequests.length = 0;
-  const res = await fetch(discovery.token_endpoint, {
-    method: 'POST',
-    headers: { 'content-type': 'application/x-www-form-urlencoded' },
-    body: 'grant_type=authorization_code&code=CODE123',
-  });
-  assert.ok(res.status === 400 || res.status === 401, `expected client-auth rejection, got ${res.status}`);
-  // The proxy must NOT have redeemed the code upstream with its own secret.
-  assert.equal(
-    tokenRequests.some((b) => new URLSearchParams(b).get('client_secret') === FAKE_SECRET),
-    false,
-    'the proxy must not redeem an unauthenticated code with its own client_secret',
-  );
+test('F2: refresh ownership survives rotation and applies to public/confidential clients and revocation', async () => {
+  for (const method of ['none', 'client_secret_post']) {
+    const client = await registerClient(method);
+    const other = await registerClient();
+    const grant = await issueCode(client.client_id);
+    const auth = { client_id: client.client_id, ...(client.client_secret ? { client_secret: client.client_secret } : {}) };
+    const issued = await (await token({ grant_type: 'authorization_code', code: grant.code, code_verifier: VERIFIER, ...auth })).json() as { refresh_token: string };
+    let refresh = issued.refresh_token;
+    for (let rotation = 0; rotation < 2; rotation++) {
+      const count = tokenRequests.length;
+      assert.equal((await token({ grant_type: 'refresh_token', refresh_token: refresh, client_id: other.client_id })).status, 400);
+      assert.equal(tokenRequests.length, count);
+      if (method !== 'none') {
+        assert.equal((await token({ grant_type: 'refresh_token', refresh_token: refresh, client_id: client.client_id })).status, 400);
+        assert.equal(tokenRequests.length, count);
+      }
+      const response = await token({ grant_type: 'refresh_token', refresh_token: refresh, ...auth });
+      assert.equal(response.status, 200);
+      refresh = (await response.json()).refresh_token;
+    }
+    const rawRefresh = [...refreshTokens].at(-1)!;
+    const count = tokenRequests.length;
+    assert.equal((await token({ grant_type: 'refresh_token', refresh_token: rawRefresh, ...auth })).status, 400);
+    assert.equal(tokenRequests.length, count);
+    const revokedCount = revokedTokens.length;
+    const revoke = (clientAuth: Record<string, string>) => fetch(discovery.revocation_endpoint, {
+      method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ token: refresh, token_type_hint: 'refresh_token', ...clientAuth }),
+    });
+    await revoke({ client_id: other.client_id });
+    assert.equal(revokedTokens.length, revokedCount);
+    assert.equal((await revoke(auth)).status, 200);
+    assert.equal(revokedTokens.at(-1), rawRefresh);
+  }
 });
 
-// ─── F17 — token logging, reflected XSS, Host-driven discovery ────────────────
-
-test('F17: the callback error page does not reflect error_description unescaped', async () => {
-  const payload = '<script>alert(document.domain)</script>';
-  const res = await fetch(`${url}/oauth/callback?error=x&error_description=${encodeURIComponent(payload)}`);
-  const html = await res.text();
-  assert.equal(html.includes(payload), false, 'error_description must not be reflected as raw HTML (XSS)');
+test('F2: code redemption without any client identity never reaches XSUAA', async () => {
+  const count = tokenRequests.length;
+  assert.equal((await token({ grant_type: 'authorization_code', code: 'CODE123' })).status, 400);
+  assert.equal(tokenRequests.length, count);
 });
 
-test('F17: OAuth codes and refresh tokens are redacted from the request log', async () => {
-  const marker = serverLogs.length; // only scan what this test produces
-  await fetch(`${url}/oauth/token?grant_type=refresh_token&refresh_token=RT-SENTINEL-123`).catch(() => {});
-  await fetch(`${url}/oauth/callback?code=CODE-SENTINEL-999&state=zz`, { redirect: 'manual' }).catch(() => {});
-  await new Promise((r) => setTimeout(r, 500));
+test('F17: valid signed callback state reaches the HTML-escaping error page', async () => {
+  const client = await registerClient();
+  const response = await authorize(client.client_id);
+  const state = new URL(response.headers.get('location')!).searchParams.get('state')!;
+  const payload = '<script>alert("x")</script>';
+  const params = new URLSearchParams({ state, error: payload, error_description: payload });
+  const callback = await fetch(`${url}/oauth/callback?${params}`, { redirect: 'manual' });
+  assert.equal(callback.status, 400);
+  assert.equal(callback.headers.get('location'), null);
+  const html = await callback.text();
+  assert.equal(html.includes(payload), false);
+  assert.ok(html.includes('&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;'));
+});
+
+test('F17: the advertised token endpoint rejects GET and redacts refresh tokens and codes from logs', async () => {
+  const marker = serverLogs.length;
+  const count = tokenRequests.length;
+  const response = await fetch(`${discovery.token_endpoint}?grant_type=refresh_token&refresh_token=RT-SENTINEL-123`);
+  assert.equal(response.status, 405);
+  assert.equal(tokenRequests.length, count);
+  await fetch(`${url}/oauth/callback?code=CODE-SENTINEL-999&state=zz`, { redirect: 'manual' });
+  await new Promise((resolve) => setTimeout(resolve, 500));
   const fresh = serverLogs.slice(marker);
-  assert.equal(fresh.includes('RT-SENTINEL-123'), false, 'refresh_token must not appear in the log');
-  assert.equal(fresh.includes('CODE-SENTINEL-999'), false, 'auth code must not appear in the log');
-  // Prove the request WAS logged (path kept) — so the absence above is redaction,
-  // not merely a silent logger.
-  assert.match(fresh, /\/oauth\/token\?<redacted>/, 'the path should still be logged with the query redacted');
+  assert.equal(fresh.includes('RT-SENTINEL-123'), false);
+  assert.equal(fresh.includes('CODE-SENTINEL-999'), false);
+  assert.ok(fresh.includes(`${new URL(discovery.token_endpoint).pathname}?<redacted>`));
+  assert.ok(fresh.includes('/oauth/callback?<redacted>'));
 });
 
-test('F17: discovery metadata is built from a configured base URL, not the Host header', async () => {
-  const res = await fetch(`${url}/.well-known/oauth-authorization-server`, { headers: { host: 'evil.example' } });
-  const meta = await res.json() as { authorization_endpoint: string; issuer: string; token_endpoint: string };
-  assert.equal(meta.authorization_endpoint.includes('evil.example'), false, 'Host header must not drive discovery URLs');
-  assert.equal(meta.issuer.includes('evil.example'), false);
-  assert.equal(meta.token_endpoint.includes('evil.example'), false);
+test('F17/R4: discovery uses the pinned public origin despite Host and ambient CF metadata', async () => {
+  const response = await fetch(`${url}/.well-known/oauth-authorization-server`, { headers: { host: 'evil.example' } });
+  const meta = await response.json() as Record<string, string>;
+  for (const key of ['authorization_endpoint', 'token_endpoint', 'registration_endpoint', 'issuer']) {
+    assert.equal(new URL(meta[key]).origin, url);
+  }
 });

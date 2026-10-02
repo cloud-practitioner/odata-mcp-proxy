@@ -17,7 +17,8 @@
     "odata-mcp-proxy": "dist/cli.js"
   },
   "files": [
-    "dist/"
+    "dist/",
+    "xs-security.json"
   ],
   "license": "MIT",
   "scripts": {

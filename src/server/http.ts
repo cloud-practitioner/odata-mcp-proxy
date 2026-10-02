@@ -5,7 +5,7 @@
 // health check — plus inbound authentication via `@arc-mcp/xsuaa-auth`:
 // the MCP-native XSUAA OAuth proxy (RFC 8414 discovery + RFC 7591 stateless
 // dynamic client registration + an HMAC-signed `/oauth/callback` proxy) and a
-// chained bearer verifier (XSUAA → OIDC → API key). The `/mcp` protocol routes
+// XSUAA bearer verifier. The `/mcp` protocol routes
 // (POST/GET/DELETE) are registered by the entry point (src/index.ts) after
 // transport initialisation; they sit behind the bearer guard mounted here.
 //
@@ -25,42 +25,25 @@
 // =============================================================================
 
 import {
-  type AuthOptions,
   type Logger as AuthLogger,
   type XsuaaCredentials,
   loadXsuaaCredentials,
   resolveAppUrl,
-  setupHttpAuth,
 } from '@arc-mcp/xsuaa-auth';
 import cors from 'cors';
 import express, { type Express, type NextFunction, type Request, type Response } from 'express';
 import { logger } from '../utils/logger.js';
+import { setupXsuaaAuth } from './oauth.js';
 
 /**
  * Environment variable naming the public base URL this server advertises in its
  * OAuth discovery / protected-resource metadata. Set it when the app is reached
- * through a reverse proxy on a different host/base-path than the CF route. When
+ * through a reverse proxy on a different host than the CF route. It must be an
+ * HTTP(S) origin without a base path, query, fragment, or credentials. When
  * unset, {@link resolveAppUrl} falls back to the `VCAP_APPLICATION` route and
  * then a `localhost` default — in no case the request `Host` header (F17).
  */
 export const PUBLIC_URL_ENV_VAR = 'PUBLIC_BASE_URL';
-
-/**
- * Query-string parameter names whose values must never be written to a log.
- * Used only as documentation for the redaction below — the logger drops the
- * whole query string, so this list is the audit trail of *why*.
- */
-const SENSITIVE_QUERY_PARAMS = [
-  'code',
-  'refresh_token',
-  'access_token',
-  'token',
-  'id_token',
-  'client_secret',
-  'code_verifier',
-  'assertion',
-] as const;
-void SENSITIVE_QUERY_PARAMS;
 
 /**
  * Redact the query string from a request URL before it is logged. OAuth
@@ -86,19 +69,19 @@ const authLogger: AuthLogger = {
 
 /**
  * Load the bound XSUAA credentials, or `undefined` when none is bound (local /
- * stdio dev — `/mcp` is then left open). `loadXsuaaCredentials` throws when there
- * is no (complete) xsuaa binding, so it is guarded.
+ * stdio dev — `/mcp` is then left open). An invalid binding rejects startup.
  */
 function loadXsuaa(): XsuaaCredentials | undefined {
-  if (!process.env.VCAP_SERVICES) return undefined;
-  try {
-    return loadXsuaaCredentials();
-  } catch (err) {
-    logger.warn('XSUAA service not bound or incomplete — OAuth disabled', {
-      error: err instanceof Error ? err.message : String(err),
-    });
+  if (process.env.VCAP_SERVICES === undefined) return undefined;
+  const services = JSON.parse(process.env.VCAP_SERVICES);
+  if (!services || typeof services !== 'object' || Array.isArray(services)) {
+    throw new Error('VCAP_SERVICES must be an object');
+  }
+  if (services.xsuaa === undefined || (Array.isArray(services.xsuaa) && services.xsuaa.length === 0)) {
     return undefined;
   }
+  if (!Array.isArray(services.xsuaa)) throw new Error('Invalid XSUAA binding');
+  return loadXsuaaCredentials();
 }
 
 /**
@@ -178,24 +161,18 @@ export function createHttpServer(port: number): Express {
   });
 
   // ── Inbound auth: XSUAA OAuth proxy + bearer guard on /mcp ──────────────────────
-  // setupHttpAuth mounts the OAuth router (discovery + DCR + authorize/token/revoke)
-  // and the `/oauth/callback` proxy, and returns the bearer middleware for `/mcp`
-  // (or undefined when no method is configured → endpoint left open).
-  //
   // The metadata URLs are resolved from a configured public base URL (or the CF
   // route), never the request Host header (F17 Host-poisoning of the cacheable
   // discovery document).
-  const options: AuthOptions = credentials
-    ? {
-        xsuaa: {
-          credentials,
-          appUrl: resolveAppUrl(process.env, { port, publicUrlEnvVar: PUBLIC_URL_ENV_VAR }),
-          scopesSupported: [],
-          resourceName: 'OData MCP Proxy',
-        },
-      }
-    : {};
-  const bearer = setupHttpAuth(app, options, authLogger);
+  let bearer;
+  if (credentials) {
+    const appUrl = new URL(resolveAppUrl(process.env, { port, publicUrlEnvVar: PUBLIC_URL_ENV_VAR }));
+    if (!['http:', 'https:'].includes(appUrl.protocol) || appUrl.pathname !== '/' ||
+        appUrl.search || appUrl.hash || appUrl.username || appUrl.password) {
+      throw new Error('PUBLIC_BASE_URL must be an HTTP(S) origin without a base path');
+    }
+    bearer = setupXsuaaAuth(app, credentials, appUrl.origin, authLogger);
+  }
   if (bearer) {
     app.use('/mcp', bearer);
     logger.info('XSUAA OAuth proxy enabled — /mcp requires a valid bearer token');
