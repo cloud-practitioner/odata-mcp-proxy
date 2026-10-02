@@ -21,7 +21,8 @@ const challenge = (verifier: string) => createHash('sha256').update(verifier).di
 const tokenRequests: string[] = [];
 const revokedTokens: string[] = [];
 const codes = new Map<string, { challenge: string; redirectUri: string }>();
-const refreshTokens = new Set<string>();
+const refreshTokens = new Map<string, number>();
+let tokenFailure: { status: number; body: string } | 'disconnect' | undefined;
 let xsuaa: Server;
 let xsuaaUrl: string;
 let child: ChildProcess;
@@ -77,6 +78,17 @@ before(async () => {
         return;
       }
       tokenRequests.push(body);
+      if (tokenFailure) {
+        const failure = tokenFailure;
+        tokenFailure = undefined;
+        if (failure === 'disconnect') {
+          req.socket.destroy();
+        } else {
+          res.writeHead(failure.status, { 'content-type': 'application/json' });
+          res.end(failure.body);
+        }
+        return;
+      }
       let valid = params.get('client_id') === CLIENT_ID && params.get('client_secret') === FAKE_SECRET;
       if (params.get('grant_type') === 'authorization_code') {
         const code = params.get('code') ?? '';
@@ -87,7 +99,7 @@ before(async () => {
         if (valid) codes.delete(code);
       } else if (params.get('grant_type') === 'refresh_token') {
         const token = params.get('refresh_token') ?? '';
-        valid = valid && refreshTokens.has(token);
+        valid = valid && (refreshTokens.get(token) ?? 0) > Date.now();
         if (valid) refreshTokens.delete(token);
       } else {
         valid = false;
@@ -98,7 +110,7 @@ before(async () => {
         return;
       }
       const refreshToken = randomUUID();
-      refreshTokens.add(refreshToken);
+      refreshTokens.set(refreshToken, Date.now() + 60_000);
       res.end(JSON.stringify({
         access_token: 'victim-access-token',
         refresh_token: refreshToken,
@@ -360,7 +372,7 @@ test('F2: refresh ownership survives rotation and applies to public/confidential
       assert.equal(response.status, 200);
       refresh = (await response.json()).refresh_token;
     }
-    const rawRefresh = [...refreshTokens].at(-1)!;
+    const rawRefresh = [...refreshTokens.keys()].at(-1)!;
     const count = tokenRequests.length;
     assert.equal((await token({ grant_type: 'refresh_token', refresh_token: rawRefresh, ...auth })).status, 400);
     assert.equal(tokenRequests.length, count);
@@ -373,6 +385,80 @@ test('F2: refresh ownership survives rotation and applies to public/confidential
     assert.equal(revokedTokens.length, revokedCount);
     assert.equal((await revoke(auth)).status, 200);
     assert.equal(revokedTokens.at(-1), rawRefresh);
+    const countAfterRevocation = tokenRequests.length;
+    const revoked = await token({ grant_type: 'refresh_token', refresh_token: refresh, ...auth });
+    assert.equal(revoked.status, 400);
+    assert.equal((await revoked.json()).error, 'invalid_grant');
+    assert.equal(tokenRequests.length, countAfterRevocation + 1);
+  }
+});
+
+test('R9: consumed authorization codes return invalid_grant for public and confidential clients', async () => {
+  for (const method of ['none', 'client_secret_post']) {
+    const client = await registerClient(method);
+    const grant = await issueCode(client.client_id);
+    const params = {
+      grant_type: 'authorization_code', code: grant.code, code_verifier: VERIFIER,
+      client_id: client.client_id, ...(client.client_secret ? { client_secret: client.client_secret } : {}),
+    };
+    assert.equal((await token(params)).status, 200);
+    const count = tokenRequests.length;
+    const consumed = await token(params);
+    assert.equal(consumed.status, 400);
+    assert.equal((await consumed.json()).error, 'invalid_grant');
+    assert.equal(tokenRequests.length, count + 1);
+  }
+});
+
+test('R9: expired upstream refresh tokens return invalid_grant for public and confidential clients', async () => {
+  for (const method of ['none', 'client_secret_post']) {
+    const client = await registerClient(method);
+    const grant = await issueCode(client.client_id);
+    const auth = { client_id: client.client_id, ...(client.client_secret ? { client_secret: client.client_secret } : {}) };
+    const response = await token({ grant_type: 'authorization_code', code: grant.code, code_verifier: VERIFIER, ...auth });
+    assert.equal(response.status, 200);
+    const issued = await response.json() as { refresh_token: string };
+    const rawRefresh = [...refreshTokens.keys()].at(-1)!;
+    refreshTokens.set(rawRefresh, Date.now() - 1);
+    const count = tokenRequests.length;
+    const expired = await token({ grant_type: 'refresh_token', refresh_token: issued.refresh_token, ...auth });
+    assert.equal(expired.status, 400);
+    assert.equal((await expired.json()).error, 'invalid_grant');
+    assert.equal(tokenRequests.length, count + 1);
+  }
+});
+
+test('R9: upstream 5xx, unrelated OAuth errors, malformed responses, and transport failures remain server errors for both grants', async () => {
+  const client = await registerClient();
+  const initialGrant = await issueCode(client.client_id);
+  const issuedResponse = await token({ grant_type: 'authorization_code', code: initialGrant.code, code_verifier: VERIFIER, client_id: client.client_id });
+  assert.equal(issuedResponse.status, 200);
+  const issued = await issuedResponse.json() as { refresh_token: string };
+  const grant = await issueCode(client.client_id);
+  const requests = [
+    { grant_type: 'authorization_code', code: grant.code, code_verifier: VERIFIER, client_id: client.client_id },
+    { grant_type: 'refresh_token', refresh_token: issued.refresh_token, client_id: client.client_id },
+  ];
+  const failures: Array<NonNullable<typeof tokenFailure>> = [
+    { status: 503, body: JSON.stringify({ error: 'invalid_grant' }) },
+    { status: 400, body: JSON.stringify({ error: 'invalid_client' }) },
+    { status: 400, body: 'not-json' },
+    'disconnect',
+  ];
+  try {
+    for (const params of requests) {
+      for (const failure of failures) {
+        tokenFailure = failure;
+        const count = tokenRequests.length;
+        const response = await token(params);
+        assert.equal(response.status, 500);
+        assert.equal((await response.json()).error, 'server_error');
+        assert.equal(tokenRequests.length, count + 1);
+      }
+      assert.equal((await token(params)).status, 200);
+    }
+  } finally {
+    tokenFailure = undefined;
   }
 });
 

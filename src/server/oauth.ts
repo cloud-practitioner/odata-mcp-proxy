@@ -56,6 +56,34 @@ export function setupXsuaaAuth(app: Express, credentials: XsuaaCredentials, appU
     kdfLabel: 'odata-mcp-refresh/v1',
     ttlSeconds: 0,
   });
+  const exchangeGrant = async (grant: Record<string, string>): Promise<OAuthTokens> => {
+    const response = await fetch(`${credentials.url}/oauth/token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        ...grant,
+        client_id: credentials.clientid,
+        client_secret: credentials.clientsecret,
+      }),
+    });
+    if (!response.ok) {
+      if (response.status >= 400 && response.status < 500) {
+        const rejection = await response.json().catch(() => undefined);
+        if (rejection?.error === 'invalid_grant') {
+          throw new InvalidGrantError('The upstream authorization grant is invalid or expired');
+        }
+      }
+      throw new Error(`XSUAA token exchange failed: ${response.status}`);
+    }
+    const tokens = await response.json() as OAuthTokens;
+    return {
+      access_token: tokens.access_token,
+      token_type: tokens.token_type ?? 'bearer',
+      expires_in: tokens.expires_in,
+      refresh_token: tokens.refresh_token,
+      scope: tokens.scope,
+    };
+  };
   const bindRefreshToken = (tokens: OAuthTokens, clientId: string): OAuthTokens => ({
     ...tokens,
     refresh_token: tokens.refresh_token
@@ -107,12 +135,20 @@ export function setupXsuaaAuth(app: Express, credentials: XsuaaCredentials, appU
         throw new InvalidGrantError('code_verifier does not match the challenge');
       }
       return bindRefreshToken(
-        await upstream.exchangeAuthorizationCode(client, grant.code, verifier, redirectUri),
+        await exchangeGrant({
+          grant_type: 'authorization_code',
+          code: grant.code,
+          code_verifier: verifier,
+          redirect_uri: `${appUrl}/oauth/callback`,
+        }),
         client.client_id,
       );
     },
-    exchangeRefreshToken: async (client, token, scopes) => bindRefreshToken(
-      await upstream.exchangeRefreshToken(client, unwrapRefreshToken(token, client.client_id), scopes),
+    exchangeRefreshToken: async (client, token) => bindRefreshToken(
+      await exchangeGrant({
+        grant_type: 'refresh_token',
+        refresh_token: unwrapRefreshToken(token, client.client_id),
+      }),
       client.client_id,
     ),
     verifyAccessToken: (token) => upstream.verifyAccessToken(token),
