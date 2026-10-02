@@ -192,6 +192,8 @@ export async function start(options: StartOptions = {}): Promise<void> {
   const xsuaa = config.mcpTransport === 'http' ? new XsuaaAuth() : undefined;
   const enforceScopes = xsuaa?.isConfigured() ?? false;
 
+  // Navigation tools need no separate term: they enforce the requiredScope of
+  // their parent's enabled list/get, which this check already counts.
   const allCategories =
     config.enabledApiCategories.length === 1 && config.enabledApiCategories[0] === 'all';
   const declaresScopes = allEntitySets
