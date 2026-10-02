@@ -38,7 +38,7 @@ export interface BuildPathOptions {
   urlPath: string;
   /** The API's path prefix, e.g. "/api/v1". */
   pathPrefix: string;
-  /** Model-supplied OData path suffix (keys, query options, navigation). */
+  /** Model-supplied OData or REST path suffix (keys, query options, navigation). */
   path?: string;
   /** Navigation property to append, if this is a nav tool/call. */
   navProperty?: string;
@@ -99,8 +99,9 @@ export function buildEntityPath(opts: BuildPathOptions): string {
   const fullPath = `${urlPath}${suffix}`;
 
   // Defense in depth: after URL normalisation the resolved path must still live
-  // under this entity set's prefix. The forbidden-token checks above already
-  // reject the known escapes; this catches anything they miss. (F3)
+  // under this entity set's prefix at a key or slash boundary, not a lookalike
+  // prefix such as ProductsAdmin for Products. The forbidden-token checks above
+  // already reject the known escapes; this catches anything they miss. (F3)
   const resolved = new URL(`${pathPrefix}/${fullPath}`, 'http://odata.invalid');
   const expectedPrefix = `${pathPrefix}/${urlPath}`;
   if (

@@ -187,7 +187,7 @@ export class ODataClient {
    * @param method - HTTP method (GET, POST, PATCH, PUT, DELETE)
    * @param path   - Relative path, may include query string
    * @param body   - Optional request body for POST/PATCH/PUT
-   * @param extraHeaders - Optional additional HTTP headers
+   * @param extraHeaders - Optional headers filtered by {@link sanitizeRequestHeaders}
    */
   async execute(
     method: string,
