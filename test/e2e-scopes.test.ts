@@ -341,9 +341,14 @@ test('HTTP with XSUAA bound: a request without a bearer token is rejected', asyn
       }),
     });
     assert.equal(response.status, 401);
+    // The bearer guard now comes from the MCP SDK's `requireBearerAuth`
+    // (via `@arc-mcp/xsuaa-auth`), which rejects a tokenless request with the
+    // standard RFC 6750 `invalid_token` body rather than the previous
+    // hand-rolled shape. The security property under test — a request without
+    // a bearer token is rejected with 401 — is unchanged.
     assert.deepEqual(await response.json(), {
-      error: 'unauthorized',
-      error_description: 'Missing Bearer token',
+      error: 'invalid_token',
+      error_description: 'Missing Authorization header',
     });
   } finally {
     await stopHttp(child);

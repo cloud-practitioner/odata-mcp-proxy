@@ -19,7 +19,6 @@ import { createMcpServer } from './server/mcp-server.js';
 import { SessionStore } from './server/sessions.js';
 import { registerAllTools, findUnknownCategories } from './tools/registry.js';
 import { registerApiDocResources } from './resources/index.js';
-import { XsuaaAuth } from './auth/xsuaa-auth.js';
 
 // ─── Public API ──────────────────────────────────────────────────────────────
 
@@ -206,14 +205,22 @@ export async function start(options: StartOptions = {}): Promise<void> {
 
   // ── Scope policy ────────────────────────────────────────────────────────────
   //
-  // `requiredScope` is checked against the caller's JWT, which only exists
-  // when the transport authenticates callers: HTTP with XSUAA bound, where
-  // requireAuth() rejects requests without a valid bearer token. Over stdio,
+  // `requiredScope` is checked against the caller's JWT (attached at
+  // `req.auth.token` by the `@arc-mcp/xsuaa-auth` bearer verifier), which only
+  // exists when the transport authenticates callers: HTTP with XSUAA bound,
+  // where the bearer guard rejects requests without a valid token. Over stdio,
   // or HTTP without XSUAA, there is no caller token, so enforcing would reject
   // every scoped call; backend access is governed by the destination
   // credentials instead.
-  const xsuaa = config.mcpTransport === 'http' ? new XsuaaAuth() : undefined;
-  const enforceScopes = xsuaa?.isConfigured() ?? false;
+  //
+  // The XSUAA-bound check must agree with createHttpServer()'s own decision to
+  // mount the bearer guard, so it routes through the same `isXsuaaConfigured`
+  // helper. Imported dynamically to keep the stdio path free of the HTTP/auth
+  // module graph.
+  const enforceScopes =
+    config.mcpTransport === 'http'
+      ? (await import('./server/http.js')).isXsuaaConfigured()
+      : false;
 
   // Navigation tools need no separate term: they enforce the requiredScope of
   // their parent's enabled list/get, which this check already counts.
@@ -296,7 +303,7 @@ export async function start(options: StartOptions = {}): Promise<void> {
       './server/http.js'
     );
 
-    const app = createHttpServer(config.port, xsuaa!);
+    const app = createHttpServer(config.port);
 
     // Active sessions (sessionId -> transport + server) for stateful mode.
     type Session = {
