@@ -218,7 +218,7 @@ Or set it via environment variable:
 API_CONFIG_FILE=my-custom-config.json npm start
 ```
 
-If no config file is found in the working directory, the bundled defaults (SAP Cloud Integration APIs) are used.
+See [Configuration](#configuration) for the config-file resolution order and bundled default.
 
 ### 4. Configure credentials
 
@@ -536,7 +536,7 @@ For detailed deployment instructions, destination configuration, and XSUAA setup
 
 ## Configuration
 
-All configuration is managed through environment variables. The server validates configuration at startup using Zod and fails fast on invalid values.
+The server validates core environment settings and the selected API config at startup using Zod and fails fast on invalid values. `NODE_ENV` and `CORS_ORIGIN` are read directly, without schema validation.
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
@@ -546,10 +546,10 @@ All configuration is managed through environment variables. The server validates
 | `REQUEST_TIMEOUT` | No | `60000` | HTTP request timeout in milliseconds |
 | `ENABLED_API_CATEGORIES` | No | `all` | Comma-separated list of API categories to enable (see below) |
 | `API_CONFIG_FILE` | No | `api-config.json` | Config file name or absolute path. A relative name is resolved against the current working directory, then the entry-script directory, then the package's bundled `dist/config/`. |
-| `CORS_ORIGIN` | No | -- | Allowed CORS origin for the HTTP transport. Only enforced when `NODE_ENV=production`; unset in production disables cross-origin requests. In non-production any origin is reflected. |
-| `NODE_ENV` | No | -- | Set to `production` to tighten CORS to `CORS_ORIGIN` (otherwise all origins are reflected for local development). |
+| `CORS_ORIGIN` | No | -- | HTTP CORS allow-origin value, used only when `NODE_ENV=production`; unset in production omits CORS allow-origin headers. Non-production reflects the request origin. CORS is a browser policy, not authentication. |
+| `NODE_ENV` | No | -- | `production` selects structured JSON logging and restricts HTTP CORS to `CORS_ORIGIN`; other values select pretty development logs and reflect any origin. |
 
-> **Destinations and credentials** are configured in `src/config/api-config.json` (the `destination` field), not via env vars. On BTP they resolve through the bound Destination service; for local development the per-destination OAuth2 env vars are derived from the `destination` name (see [docs/LOCAL_RUN.md](docs/LOCAL_RUN.md)).
+> **Destination names** are configured in the active API config's `destination` field (see [API config](#3-add-your-api-config)). On BTP, credentials resolve through the bound Destination service; for local development, configure the per-destination OAuth2 env vars described in [docs/LOCAL_RUN.md](docs/LOCAL_RUN.md#local-authentication-variables).
 
 ### API Categories
 
@@ -727,7 +727,7 @@ MCP_TRANSPORT=stdio npm start
 
 - **Runtime:** Node.js 20+ with ES Modules
 - **Language:** TypeScript 5.7+
-- **MCP SDK:** `@modelcontextprotocol/sdk` 1.27+
+- **MCP SDK:** `@modelcontextprotocol/sdk` (resolved version in [package-lock.json](package-lock.json))
 - **SAP Cloud SDK:** `@sap-cloud-sdk/connectivity` and `@sap-cloud-sdk/http-client` 4.x for destination resolution and HTTP calls
 - **Validation:** Zod for configuration and input validation
 - **HTTP Framework:** Express 4.x (HTTP transport only)

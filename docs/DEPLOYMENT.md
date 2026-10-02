@@ -62,11 +62,7 @@ In the SAP BTP cockpit, navigate to **Connectivity > Destinations** in the subac
 
 ## 4. Configure Environment Variables
 
-The server reads **no** `SAP_DESTINATION_NAME` variable. On BTP the destination
-is resolved by name through the bound Destination service, and that name must
-match the `destination` field in `src/config/api-config.json` (default
-`CPI_DESTINATION`). Make sure the BTP destination you created in Section 3 uses
-exactly that name.
+Configure the destination as described in [Section 3](#3-create-the-btp-destination); its name is selected by the API config, not an environment variable.
 
 All environment variables are optional and have sensible defaults:
 
@@ -77,9 +73,8 @@ All environment variables are optional and have sensible defaults:
 | `LOG_LEVEL`               | `info`    | Logging level (`error`, `warn`, `info`, `debug`)       |
 | `REQUEST_TIMEOUT`         | `60000`   | HTTP request timeout in milliseconds                   |
 | `ENABLED_API_CATEGORIES`  | `all`     | Comma-separated list of API categories to enable       |
-| `API_CONFIG_FILE`         | `api-config.json` | Config file name or absolute path                |
-| `NODE_ENV`                | --        | Set to `production` to restrict CORS to `CORS_ORIGIN`  |
-| `CORS_ORIGIN`             | --        | Allowed CORS origin (only enforced when `NODE_ENV=production`) |
+
+For config-file selection (`API_CONFIG_FILE`), production logging (`NODE_ENV`), and HTTP CORS (`CORS_ORIGIN`), see the [configuration reference](../README.md#configuration).
 
 > **Note:** On Cloud Foundry the `PORT` variable is set automatically by the platform. Do not override it.
 

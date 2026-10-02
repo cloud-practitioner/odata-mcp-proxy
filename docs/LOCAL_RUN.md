@@ -34,9 +34,7 @@ cp .env.example .env
 
 ### Destination and Credentials
 
-There is **no** `SAP_DESTINATION_NAME` env var. Destination names are defined in
-`src/config/api-config.json` (the `destination` field; the default config uses
-`CPI_DESTINATION`).
+Destination names are defined by the active [API config](../README.md#3-add-your-api-config), not an environment variable.
 
 ### Local Authentication Variables
 
@@ -67,9 +65,8 @@ You obtain these values by creating a **service key** for the
 | `LOG_LEVEL` | `info` | Logging verbosity: `error`, `warn`, `info`, `debug` |
 | `REQUEST_TIMEOUT` | `60000` | HTTP request timeout in milliseconds |
 | `ENABLED_API_CATEGORIES` | `all` | Comma-separated list of API categories (see below) |
-| `API_CONFIG_FILE` | `api-config.json` | Config file name or absolute path (resolved against cwd, then the entry-script dir, then the bundled `dist/config/`) |
-| `CORS_ORIGIN` | -- | Allowed CORS origin; only enforced when `NODE_ENV=production` |
-| `NODE_ENV` | -- | Set to `production` to restrict CORS to `CORS_ORIGIN` (otherwise all origins are reflected) |
+
+For config-file selection (`API_CONFIG_FILE`), production logging (`NODE_ENV`), and HTTP CORS (`CORS_ORIGIN`), see the [configuration reference](../README.md#configuration).
 
 ### Example `.env` for Local Development
 
@@ -137,17 +134,10 @@ Verify the server is running:
 curl http://localhost:4004/health
 ```
 
-Expected response:
-
-```json
-{
-  "status": "ok",
-  "timestamp": "2025-01-01T00:00:00.000Z",
-  "version": "1.3.0"
-}
-```
-
-(`version` is read from `package.json`, so it tracks the installed release.)
+The JSON response contains `status: "ok"`, the current `timestamp`, `version`
+read from the installed package's `package.json`, and an `oauth` boolean
+indicating whether XSUAA is configured. The version contract is covered by
+[`test/health.test.ts`](../test/health.test.ts).
 
 For live-reloading during development:
 
