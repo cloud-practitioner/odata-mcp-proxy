@@ -205,7 +205,8 @@ function collectIssues(issues: z.ZodIssue[]): z.ZodIssue[] {
  *
  * @param raw    - The JSON-parsed file content.
  * @param source - File path, used in the error message.
- * @throws {Error} listing every issue with its location in the document.
+ * @param enabledCategories - Effective category filter (defaults to all).
+ * @throws {Error} with structural issue locations or colliding registration names.
  */
 export function parseApiConfig(raw: unknown, source: string, enabledCategories: string[] = ['all']): ApiConfig {
   const result = apiConfigSchema.safeParse(raw);
@@ -216,11 +217,6 @@ export function parseApiConfig(raw: unknown, source: string, enabledCategories: 
     throw new Error(`API config validation failed for ${source}:\n${issues}`);
   }
 
-  // Structurally valid — now reject configs that would register the same MCP
-  // tool name or resource URI twice (e.g. two entity sets with the same name).
-  // The SDK throws "... already registered" only inside the per-session
-  // factory, so without this check the crash lands on the first client
-  // connect, not at startup.
   const { tools, resources } = findDuplicateRegistrations(result.data, enabledCategories);
   if (tools.length > 0 || resources.length > 0) {
     const problems = [

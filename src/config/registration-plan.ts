@@ -1,12 +1,11 @@
 // =============================================================================
 // Registration plan — the tool names and resource URIs a config will generate.
 //
-// MCP's `server.tool()` / `registerResource()` throw "... already registered"
-// when the same name is registered twice, but that throw happens inside the
-// per-session factory (on the first client connect over HTTP, or at launch
-// over stdio) rather than at startup. Enumerating the names the config will
-// generate lets `parseApiConfig` reject a colliding config up front, with a
-// message that names the clash instead of a late crash.
+// MCP registration rejects duplicate tool names and resource URIs. This plan
+// must mirror the effective registrations from `registerAllTools` and
+// `buildIndex`, not a maximal, unfiltered config: disabled definitions and
+// discovery-hidden tools must not cause false collisions. Regression coverage
+// lives in test/api-config-schema.test.ts.
 //
 // Kept free of runtime dependencies (types only) so it can be unit-tested and
 // so it never pulls the config loader into a cycle.
@@ -106,8 +105,8 @@ function duplicates(items: string[]): string[] {
 }
 
 /**
- * Duplicate generated tool names and resource URIs for a config. A non-empty
- * result means the config would crash the per-session factory on first use.
+ * Duplicate tool names and resource URIs in the effective registration set.
+ * A non-empty result identifies registrations the MCP SDK would reject.
  */
 export function findDuplicateRegistrations(
   apiConfig: ApiConfig,

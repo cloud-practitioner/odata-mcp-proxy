@@ -173,7 +173,9 @@ Create an `api-config.json` in your project root. The CLI automatically picks it
 }
 ```
 
-The config is validated at startup: an unknown or misspelled key, a value of the wrong type, or an unsupported `method` stops the server with a message naming the offending location (e.g. `apis[0].entitySets[3].operations.update.method`). Duplicate `apis[].name` values, and any config that would register the same MCP tool name or resource URI twice (for example two entity sets with the same name), are also rejected at startup rather than crashing on the first client connection. Omitted fields fall back to defaults: `server.version` to this package's version, `apis[].name` to `api<index>` (e.g. `api0`) and `apis[].pathPrefix` to `/api/v1`.
+The config is validated at startup: an unknown or misspelled key, a value of the wrong type, or an unsupported `method` stops the server with a message naming the offending location (e.g. `apis[0].entitySets[3].operations.update.method`). Duplicate `apis[].name` values, including collisions with defaulted names, are rejected regardless of category filtering. Duplicate MCP tool names or resource URIs are rejected only when they would actually register, accounting for `ENABLED_API_CATEGORIES`, enabled operations, key requirements, and discovery mode. Repeated entity set names are allowed when they produce no effective registration collision. Omitted fields fall back to defaults: `server.version` to this package's version, `apis[].name` to `api<index>` (e.g. `api0`) and `apis[].pathPrefix` to `/api/v1`.
+
+Before starting either transport, the server builds and closes a throwaway MCP session to catch remaining registration failures, such as a UI data source referencing an unknown API. In HTTP mode these failures stop startup before the server listens, rather than surfacing on the first client connection.
 
 Each entry in `entitySets` supports:
 
@@ -451,9 +453,11 @@ Add a top-level `discovery` block and the entity tools collapse into **two stabl
 | Field | Required | Description |
 |-------|----------|-------------|
 | `mode` | yes | `search` replaces all entity tools with the meta-tools. `hybrid` does the same but keeps `alwaysRegister` entity sets as individual tools. |
-| `alwaysRegister` | no | Entity sets kept as individual tools in `hybrid` mode. Accepts `EntitySet` or `api:EntitySet` to disambiguate. Unknown names fail at startup rather than silently not pinning. |
+| `alwaysRegister` | no | Entity sets kept as individual tools in `hybrid` mode. Accepts `EntitySet` or `api:EntitySet` for lookup in the filtered discovery index. Names absent from that index fail at startup rather than silently not pinning. |
 | `maxResults` | no | Cap for a `brief` search (default `25`). |
 | `maxFullResults` | no | Cap for a `full` search (default `5`) — full schemas are verbose, so narrow first. |
+
+Pins are stored by entity set name: an API-qualified lookup does not namespace tool names or limit the pin to that API. Other category-enabled definitions with the same entity set name also keep their individual tools; any resulting registration collision is rejected as described in [API config validation](#3-add-your-api-config).
 
 ### The two tools
 
@@ -477,7 +481,7 @@ Unknown entity sets suggest the API that does have them; unavailable operations 
 
 ### Schema resources
 
-Discovery also registers one `odata://{api}/{entitySet}` resource per entity set, returning the same full schema. Hosts that pre-fetch and cache resources can read a schema with no tool round-trip and no context cost until it is read — the 2026-07-28 spec added `ttlMs`/`cacheScope` hints to `resources/read` for exactly this.
+Discovery also registers one `odata://{api}/{entitySet}` resource per entity set in its index: only category-enabled definitions with at least one available operation are included. Navigation properties alone do not keep a definition in the index. Each resource returns the same full schema. Hosts that pre-fetch and cache resources can read a schema with no tool round-trip and no context cost until it is read — the 2026-07-28 spec added `ttlMs`/`cacheScope` hints to `resources/read` for exactly this.
 
 ### Why the tool list never changes
 
@@ -496,7 +500,7 @@ import { start } from 'odata-mcp-proxy';
 await start(); // identical to running `odata-mcp-proxy`
 ```
 
-To register extra tools or resources on every MCP session, pass `registerExtras`. It runs inside the per-session factory, after the generated entity tools, API doc resources, and config-driven UI views:
+To register extra tools or resources on every MCP session, pass `registerExtras`. It runs inside the per-session factory, after the generated entity tools, API doc resources, and config-driven UI views. It also runs for the [startup self-check](#3-add-your-api-config), so it must be safe to invoke repeatedly with different `McpServer` instances, including one that never connects to a transport. An error thrown during the self-check rejects `start()`:
 
 ```js
 import { start } from 'odata-mcp-proxy';
@@ -564,7 +568,7 @@ Use `ENABLED_API_CATEGORIES` to restrict which tool groups are registered:
 | `security-content` | Keystores, certificates, SSH keys, credentials, OAuth2 clients, secure parameters, access policies |
 | `partner-directory` | Partners, string/binary parameters, alternative partners, authorized users |
 
-Set to `all` (the default) to enable every category. A requested category that matches no entity set (e.g. a typo) fails fast at startup rather than silently registering nothing.
+Set to `all` (the default) to enable every category. Otherwise, every requested category must match an entity set in the active API config, including when using discovery. An unknown category (e.g. a typo) fails startup with a message listing the unknown and available categories, even if other requested categories are valid.
 
 ### Operation Scopes
 
@@ -708,6 +712,8 @@ Non-initialize requests with an unknown session ID return HTTP 404; initialize a
 JSON request bodies on `/mcp` have a fixed **50 MiB** (`50mb`) limit, including base64 content and the JSON-RPC envelope, not just the raw artifact bytes. When XSUAA is bound, authentication runs before body parsing (see [Operation Scopes](#operation-scopes)). An oversized MCP JSON body returns HTTP `413` with a JSON-RPC error (`code: -32600`, `id: null`) explaining the limit, rather than an HTML error page. Allowed CORS origins can read this error response.
 
 Public and unmatched routes retain Express's default 100 KiB JSON body limit. Malformed JSON and URL-encoded parser errors retain Express's normal error responses; they are not converted to JSON-RPC errors.
+
+Unexpected failures in the `POST`, `GET`, or `DELETE /mcp` handlers are logged without crashing the process. If the response has not started, the server returns HTTP `500` with JSON-RPC error `-32603` (`Internal server error`); otherwise it ends the response.
 
 ```bash
 MCP_TRANSPORT=http PORT=4004 npm start

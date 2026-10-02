@@ -275,8 +275,8 @@ export interface DiscoveryOptions {
 }
 
 /**
- * Register the two discovery tools plus one `odata://` schema resource per
- * entity set.
+ * Register discovery tools and resources. See the README's "Progressive Tool
+ * Discovery" section for the public registration contract.
  */
 export function registerDiscoveryTools(server: McpServer, options: DiscoveryOptions): void {
   const { discovery, index, pinned, enforceScopes } = options;

@@ -24,8 +24,8 @@ import { XsuaaAuth } from './auth/xsuaa-auth.js';
 // ─── Public API ──────────────────────────────────────────────────────────────
 
 /**
- * Context passed to {@link StartOptions.registerExtras} for each new MCP
- * session, exposing the shared building blocks of the running server.
+ * Context passed to {@link StartOptions.registerExtras} for each MCP server
+ * instance, exposing the shared building blocks of the running server.
  */
 export interface ExtrasContext {
   /** Shared ODataClient instances keyed by API name (the `name` field in the config). */
@@ -41,7 +41,8 @@ export interface StartOptions {
    * Called inside the per-session factory — after the generated entity tools,
    * API doc resources, and config-driven UI views are registered — so
    * consumers can add their own tools/resources to every session without
-   * forking the bootstrap.
+   * forking the bootstrap. Also called for the unconnected startup probe;
+   * the hook must be safe to invoke for multiple server instances.
    */
   registerExtras?: (server: McpServer, ctx: ExtrasContext) => void;
 }
@@ -277,11 +278,8 @@ export async function start(options: StartOptions = {}): Promise<void> {
 
   // ── Startup self-check ──────────────────────────────────────────────────────
   //
-  // Build one throwaway session now so any registration error (a duplicate
-  // tool name the config check missed, or a UI view referencing an unknown
-  // API) surfaces here at startup instead of inside the per-session factory on
-  // the first client connect (HTTP) or at launch (stdio). Closing it releases
-  // the probe; shared ODataClients are untouched.
+  // Registration must succeed before HTTP can report healthy or stdio connects.
+  // Closing an unconnected probe leaves the shared ODataClients untouched.
   const probeSession = createMcpSession();
   await probeSession.close().catch(() => { /* not connected to a transport */ });
 

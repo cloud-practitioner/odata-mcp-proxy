@@ -255,8 +255,9 @@ export interface UiViewDefinition {
  *
  * When this block is present, entity tools are replaced by two stable
  * meta-tools — `search_operations` (catalog + inspect, via a `detail`
- * parameter) and `execute_operation` — plus one `odata://` schema resource per
- * entity set. Omit the block entirely and registration is unchanged.
+ * parameter) and `execute_operation`. For schema resources and registration
+ * rules, see the README's "Progressive Tool Discovery" section. Omit the block
+ * entirely and registration is unchanged.
  *
  * The tool list stays fixed for the process lifetime by design: the
  * 2026-07-28 spec removed per-connection variation of `tools/list`, and a
@@ -270,8 +271,9 @@ export interface DiscoveryDefinition {
    */
   mode: 'search' | 'hybrid';
   /**
-   * Entity sets (by `entitySet` name, optionally `api:entitySet` to
-   * disambiguate) that keep their generated tools in `hybrid` mode.
+   * Entity sets that keep their generated tools in `hybrid` mode. See the
+   * README's "Progressive Tool Discovery" section for API-qualified lookup
+   * and filtering rules.
    */
   alwaysRegister?: string[];
   /** Maximum matches returned by a `brief` search (default: 25). */

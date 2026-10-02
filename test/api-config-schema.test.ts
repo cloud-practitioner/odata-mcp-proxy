@@ -350,8 +350,12 @@ test('UI collisions with discovery and overview remain fatal with no enabled ent
   }
   assert.throws(() => parseApiConfig({
     server: { name: 's' }, apis: [],
+    ui: [{ tool: 'UI_X', uri: 'odata-mcp-proxy://api/overview', template: 't.html' }],
+  }, 'cfg.json', []), /duplicate resource URI "odata-mcp-proxy:\/\/api\/overview"/);
+  assert.doesNotThrow(() => parseApiConfig({
+    server: { name: 's' }, apis: [],
     ui: [{ tool: 'UI_X', uri: 's://api/overview', template: 't.html' }],
-  }, 'cfg.json', []), /duplicate resource URI "s:\/\/api\/overview"/);
+  }, 'cfg.json', []));
 });
 
 test('distinct entity set names are accepted', () => {
