@@ -547,6 +547,7 @@ All configuration is managed through environment variables. The server validates
 | `PORT` | No | `4004` | HTTP server port (only used when `MCP_TRANSPORT=http`) |
 | `LOG_LEVEL` | No | `info` | Logging level: `error`, `warn`, `info`, `debug` |
 | `REQUEST_TIMEOUT` | No | `60000` | HTTP request timeout in milliseconds |
+| `MCP_BODY_LIMIT` | No | `50mb` | Maximum accepted HTTP request body size (`MCP_TRANSPORT=http` only). Raised above Express's 100 kb default so base64-encoded artifact uploads are accepted; an over-limit body returns a JSON MCP error. Any `bytes`-style string |
 | `ENABLED_API_CATEGORIES` | No | `all` | Comma-separated list of API categories to enable (see below) |
 
 ### API Categories
