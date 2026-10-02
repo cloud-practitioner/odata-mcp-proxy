@@ -1,6 +1,37 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { EntitySetDefinition } from '../tools/registry.js';
+import { resolveOperation } from '../config/index.js';
 import { logger } from '../utils/logger.js';
+
+/** CRUD operations in display order. */
+const OPERATION_ORDER = ['list', 'get', 'create', 'update', 'delete'] as const;
+
+/**
+ * Operations that address a single entity and therefore need a key expression
+ * in the path: an entity set with no keys cannot expose them, so they must not
+ * be advertised as available (mirrors the discovery index key-gating).
+ */
+const KEYED_OPERATIONS = new Set(['get', 'delete']);
+
+/** Whether a comma-separated category filter admits this definition. */
+function isCategoryEnabled(category: string, enabledCategories: string[]): boolean {
+  const isAll = enabledCategories.length === 1 && enabledCategories[0] === 'all';
+  return isAll || enabledCategories.includes(category);
+}
+
+/**
+ * Return the operations that are actually available for an entity set: enabled
+ * (resolving the boolean | object form) and, for key-addressed operations,
+ * backed by at least one key property.
+ */
+function availableOperations(def: EntitySetDefinition): string[] {
+  const hasKeys = def.keys.length > 0;
+  return OPERATION_ORDER.filter((op) => {
+    if (!resolveOperation(def.operations[op]).enabled) return false;
+    if (KEYED_OPERATIONS.has(op) && !hasKeys) return false;
+    return true;
+  });
+}
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -18,32 +49,28 @@ function formatCategoryLabel(category: string): string {
     .join(' ');
 }
 
-/**
- * Return a comma-separated list of the operations that are enabled for an
- * entity set (e.g. "list, get, create").
- */
-function formatOperations(ops: EntitySetDefinition['operations']): string {
-  const labels: string[] = [];
-  if (ops.list) labels.push('list');
-  if (ops.get) labels.push('get');
-  if (ops.create) labels.push('create');
-  if (ops.update) labels.push('update');
-  if (ops.delete) labels.push('delete');
-  return labels.join(', ');
+function formatOperations(def: EntitySetDefinition): string {
+  return availableOperations(def).join(', ');
 }
 
 // ─── Markdown Generation ─────────────────────────────────────────────────────
 
 /**
- * Build the full Markdown document that summarises every registered entity set.
- *
- * Entity sets are grouped by their `category` field and listed in the order
- * they appear in the definitions array.
+ * Keep enabled-category definitions even without CRUD operations: navigation-only
+ * definitions still need their key and navigation guidance (test/api-docs.test.ts).
  */
-function buildApiOverviewMarkdown(definitions: EntitySetDefinition[], serverName: string): string {
+function buildApiOverviewMarkdown(
+  definitions: EntitySetDefinition[],
+  serverName: string,
+  enabledCategories: string[],
+): string {
+  const visible = definitions.filter(
+    (def) => isCategoryEnabled(def.category, enabledCategories),
+  );
+
   // Group definitions by category while preserving insertion order.
   const grouped = new Map<string, EntitySetDefinition[]>();
-  for (const def of definitions) {
+  for (const def of visible) {
     let group = grouped.get(def.category);
     if (!group) {
       group = [];
@@ -72,7 +99,7 @@ function buildApiOverviewMarkdown(definitions: EntitySetDefinition[], serverName
       lines.push('');
       lines.push(`**Description:** ${def.description}`);
       lines.push('');
-      lines.push(`**Operations:** ${formatOperations(def.operations)}`);
+      lines.push(`**Operations:** ${formatOperations(def)}`);
       lines.push('');
 
       // Key properties
@@ -108,24 +135,30 @@ function buildApiOverviewMarkdown(definitions: EntitySetDefinition[], serverName
 /**
  * Register MCP resources that expose API documentation to LLM clients.
  *
- * Currently registers a single static resource:
+ * See README.md's "Available Tools" section for the overview resource URI
+ * and client-facing behavior.
  *
- * - **cpi-api-overview** (`cpi://api/overview`) — a Markdown summary of all
- *   available entity sets, their operations, keys, and navigation properties.
- *
- * @param server      The MCP server instance to register resources on.
- * @param definitions The full list of entity set definitions to document.
+ * @param server            The MCP server instance to register resources on.
+ * @param definitions       The full list of entity set definitions to document.
+ * @param serverName        Server name used for the resource title and name.
+ * @param enabledCategories Category filter; defaults to ['all'] when omitted or undefined.
  */
 export function registerApiDocResources(
   server: McpServer,
   definitions: EntitySetDefinition[],
   serverName: string,
+  enabledCategories: string[] = ['all'],
 ): void {
-  const markdown = buildApiOverviewMarkdown(definitions, serverName);
+  const markdown = buildApiOverviewMarkdown(definitions, serverName, enabledCategories);
+
+  // The resource URI needs a syntactically valid scheme. A server name is not:
+  // `new URL()` lowercases it (so uppercase names become unreadable) and
+  // rejects an underscore outright. Use a fixed, valid scheme instead.
+  const overviewUri = 'odata-mcp-proxy://api/overview';
 
   server.resource(
     `${serverName}-api-overview`,
-    `${serverName}://api/overview`,
+    overviewUri,
     {
       description:
         `Markdown overview of all ${serverName} OData entity sets — their descriptions, ` +

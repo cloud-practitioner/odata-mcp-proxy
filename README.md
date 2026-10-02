@@ -590,6 +590,8 @@ Programmatic callers of `registerAllTools` / `registerEntityTools` enforce scope
 
 Tools are dynamically generated from entity set definitions. Each entity set produces up to five tools (`_list`, `_get`, `_create`, `_update`, `_delete`) plus navigation property tools, depending on what the OData API supports.
 
+Read the Markdown resource `odata-mcp-proxy://api/overview` for an overview of entity sets in enabled categories, their available CRUD operations, keys, navigation properties, and filter hints. Definitions without CRUD operations remain visible so navigation-only APIs retain their guidance. The URI is fixed regardless of the configured server name; clients using the former `{serverName}://api/overview` URI must switch to this URI.
+
 ### Integration Content
 
 | Tool | Operations |
@@ -680,7 +682,7 @@ All `_list` tools accept standard OData V2 query options:
 Tool results are decoded from the raw response bytes:
 
 - JSON content types (`application/json`, `*+json`) are returned parsed.
-- Any other body that is valid UTF-8 is returned as text, e.g. a Groovy script from `.../Resources(...)/$value`.
+- Any other body that is valid UTF-8 is returned as text, e.g. a Groovy script from `.../Resources(...)/$value`. A leading UTF-8 BOM is preserved as U+FEFF, so re-encoding the string as UTF-8 reproduces the original bytes.
 - Anything else, such as an iflow zip from `IntegrationDesigntimeArtifacts(Id='...',Version='active')/$value`, is returned losslessly as a base64 envelope:
 
 ```json
@@ -696,6 +698,10 @@ The `data` value can be passed unchanged as base64 content (e.g. `ArtifactConten
 ### HTTP (Streamable HTTP)
 
 Used for BTP Cloud Foundry deployment. The server exposes an `/mcp` endpoint supporting the MCP Streamable HTTP transport with session management, plus a `/health` endpoint for CF health checks.
+
+Each `initialize` returns a fresh server-generated UUID in the `mcp-session-id` response header. Any ID supplied on initialization is ignored without replacing an existing session; clients must use the returned ID on subsequent requests. Sessions are stored in memory with a fixed 30-minute idle TTL, measured from initialization or the last request routed to the session, and checked once per minute. Expired sessions are removed and closed.
+
+Non-initialize requests with an unknown session ID return HTTP 404; initialize again to obtain a new ID. `GET /mcp` and `DELETE /mcp` without a `mcp-session-id` header return HTTP 400 instead.
 
 ```bash
 MCP_TRANSPORT=http PORT=4004 npm start

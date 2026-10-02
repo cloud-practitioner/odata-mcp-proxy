@@ -1,0 +1,8 @@
+{
+  "server": {
+    "name": "Http_Session_E2E",
+    "version": "0.0.1",
+    "description": "Stub config for the HTTP session-management end-to-end test"
+  },
+  "apis": []
+}

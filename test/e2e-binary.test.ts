@@ -30,6 +30,8 @@ const ZIP_BYTES = Buffer.concat([
 // Valid UTF-8 with non-ASCII characters, served with CPI's vendor content type.
 const GROOVY = 'import com.sap.gateway.ip.core.customdev.util.Message\n// Grüße – ✓\ndef Message processData(Message message) { return message }\n';
 
+const BOM_SCRIPT_BYTES = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(GROOVY, 'utf8')]);
+
 const ARTIFACT = "IntegrationDesigntimeArtifacts(Id='Flow_A',Version='active')";
 const SCRIPT = "IntegrationDesigntimeArtifacts(Id='Flow_A',Version='active')/Resources(Name='script1.groovy',ResourceType='groovy')";
 
@@ -64,6 +66,11 @@ before(async () => {
     if (req.method === 'GET' && url === `/api/v1/${ARTIFACT}/$value`) {
       res.writeHead(200, { 'content-type': 'application/zip' });
       res.end(ZIP_BYTES);
+      return;
+    }
+    if (req.method === 'GET' && url === `/api/v1/${ARTIFACT}/Resources(Name='bom.groovy',ResourceType='groovy')/$value`) {
+      res.writeHead(200, { 'content-type': 'application/vnd.sap.integration.groovyscript' });
+      res.end(BOM_SCRIPT_BYTES);
       return;
     }
     if (req.method === 'GET' && url === `/api/v1/${SCRIPT}/$value`) {
@@ -170,6 +177,23 @@ test('text $value with a non-text content type is returned as text', async () =>
     });
     assert.ok(!result.isError, textOf(result));
     assert.equal(JSON.parse(textOf(result)), GROOVY);
+  });
+});
+
+test('BOM-prefixed text $value is byte-lossless through named and discovery tools', async () => {
+  await withClient(async (client) => {
+    const path = "(Id='Flow_A',Version='active')/Resources(Name='bom.groovy',ResourceType='groovy')/$value";
+    for (const [name, args] of [
+      ['IntegrationDesigntimeArtifacts_get', { path }],
+      ['execute_operation', { api: 'cpi', entitySet: 'IntegrationDesigntimeArtifacts', operation: 'get', path }],
+    ] as const) {
+      const result = await call(client, name, args);
+      assert.ok(!result.isError, textOf(result));
+      const text: unknown = JSON.parse(textOf(result));
+      assert.equal(typeof text, 'string');
+      assert.equal((text as string).charCodeAt(0), 0xfeff);
+      assert.ok(Buffer.from(text as string, 'utf8').equals(BOM_SCRIPT_BYTES), 'BOM and content bytes must survive MCP');
+    }
   });
 });
 

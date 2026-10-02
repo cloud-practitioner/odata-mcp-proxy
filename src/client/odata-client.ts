@@ -14,7 +14,9 @@ export interface BinaryResponseBody {
   data: string;
 }
 
-const strictUtf8 = new TextDecoder('utf-8', { fatal: true });
+// `ignoreBOM: true` keeps a leading UTF-8 BOM (U+FEFF) in the decoded string
+// instead of stripping it, so BOM-prefixed text round-trips byte-for-byte.
+const strictUtf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
 function toBuffer(data: unknown): Buffer | undefined {
   if (Buffer.isBuffer(data)) return data;

@@ -42,3 +42,14 @@ test('ArrayBuffer and typed-array bodies are decoded; other values pass through'
   assert.deepEqual(decodeResponseBody(view.slice().buffer, 'application/json'), {});
   assert.deepEqual(decodeResponseBody({ already: 'parsed' }, 'application/json'), { already: 'parsed' });
 });
+
+test('a UTF-8 BOM is preserved so BOM-prefixed text round-trips byte-for-byte', () => {
+  const bom = Buffer.from([0xef, 0xbb, 0xbf]);
+  const withBom = Buffer.concat([bom, Buffer.from('hello ü', 'utf8')]);
+  const decoded = decodeResponseBody(withBom, 'text/plain');
+  assert.equal(typeof decoded, 'string');
+  // The leading BOM character (U+FEFF) survives the decode…
+  assert.equal((decoded as string).charCodeAt(0), 0xfeff);
+  // …and re-encoding yields the exact original bytes.
+  assert.ok(Buffer.from(decoded as string, 'utf8').equals(withBom));
+});
