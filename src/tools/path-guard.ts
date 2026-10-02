@@ -57,6 +57,9 @@ export function buildEntityPath(opts: BuildPathOptions): string {
   const raw = opts.path ?? '';
 
   if (raw) {
+    if (/[\u0000-\u001f\u007f-\u009f]/.test(raw) || raw.endsWith(' ')) {
+      throw new PathValidationError('Path may not contain control characters or trailing spaces.');
+    }
     const lower = raw.toLowerCase();
     for (const { token, label } of FORBIDDEN_TOKENS) {
       if (lower.includes(token)) {
@@ -64,24 +67,19 @@ export function buildEntityPath(opts: BuildPathOptions): string {
       }
     }
 
-    // A valid OData suffix is a key expression "(…)", a query string "?…", or a
-    // navigation into a declared property "/Nav…". Anything else is an attempt
-    // to address a different resource. (F3)
     const first = raw[0];
     if (first !== '(' && first !== '?' && first !== '/') {
       throw new PathValidationError(
-        'Path must start with "(" (key expression), "?" (query options) or ' +
-          '"/<navigation property>".',
+        'Path must start with "(" (key expression), "?" (query options), ' +
+          '"/<navigation property>" or "/<REST key>".',
       );
     }
     if (first === '/') {
-      const segment = raw.slice(1).split(/[/?(]/)[0];
-      if (!navProperties.includes(segment)) {
+      const pathPart = raw.split('?')[0];
+      const segment = pathPart.slice(1).split(/[/(]/)[0];
+      if (!navProperties.includes(segment) && (pathPart.length === 1 || pathPart.slice(1).includes('/'))) {
         throw new PathValidationError(
-          navProperties.length > 0
-            ? `Path navigates to "/${segment}", which is not a declared navigation ` +
-                `property. Available: ${navProperties.join(', ')}.`
-            : 'Path may not start with "/": this entity set declares no navigation properties.',
+          'Path must address a declared navigation property or a single REST key segment.',
         );
       }
     }
@@ -105,7 +103,11 @@ export function buildEntityPath(opts: BuildPathOptions): string {
   // reject the known escapes; this catches anything they miss. (F3)
   const resolved = new URL(`${pathPrefix}/${fullPath}`, 'http://odata.invalid');
   const expectedPrefix = `${pathPrefix}/${urlPath}`;
-  if (!resolved.pathname.startsWith(expectedPrefix)) {
+  if (
+    resolved.pathname !== expectedPrefix &&
+    !resolved.pathname.startsWith(`${expectedPrefix}(`) &&
+    !resolved.pathname.startsWith(`${expectedPrefix}/`)
+  ) {
     throw new PathValidationError(
       `Path resolves outside the "${urlPath}" entity set and was rejected.`,
     );
