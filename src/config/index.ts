@@ -419,5 +419,5 @@ function loadApiConfig(path: string): ApiConfig {
   } catch (error) {
     throw new Error(`API config file ${path} is not valid JSON: ${error instanceof Error ? error.message : String(error)}`);
   }
-  return parseApiConfig(raw, path);
+  return parseApiConfig(raw, path, config.enabledApiCategories);
 }

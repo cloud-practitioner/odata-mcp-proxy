@@ -7,7 +7,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { parseApiConfig } from '../src/config/api-config-schema.js';
-import { resolveOperation } from '../src/config/index.js';
+import { resolveOperation, type ApiConfig } from '../src/config/index.js';
 
 const rootDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -222,6 +222,136 @@ test('two entity sets with the same name in different apis are rejected', () => 
     ],
   };
   assert.ok(errorFor(config).includes('duplicate tool name "Orders_list"'), errorFor(config));
+});
+
+test('category filters allow repeated entity and navigation tool names outside the effective set', () => {
+  const orders = { entitySet: 'Orders', category: 'sales', keys: [], operations: { list: true }, navigationProperties: [{ name: 'Items' }] };
+  for (const sameApi of [true, false]) {
+    const billing = [
+      { ...orders, category: 'billing', navigationProperties: [] },
+      { entitySet: 'Orders_Items', category: 'billing', keys: [], operations: { list: true } },
+    ];
+    const config = {
+      server: { name: 's' },
+      apis: sameApi
+        ? [{ name: 'a', destination: 'DEST', entitySets: [orders, ...billing] }]
+        : [
+            { name: 'a', destination: 'DEST', entitySets: [orders] },
+            { name: 'b', destination: 'DEST', entitySets: billing },
+          ],
+    };
+    for (const category of ['sales', 'billing']) {
+      assert.doesNotThrow(() => parseApiConfig(config, 'cfg.json', [category]));
+    }
+    assert.throws(() => parseApiConfig(config, 'cfg.json', ['sales', 'billing']), /duplicate tool name "Orders_list"/);
+    assert.match(errorFor(config), /duplicate tool name "Orders_Items_list"/);
+    assert.doesNotThrow(() => parseApiConfig({ ...config, discovery: { mode: 'search' } }, 'cfg.json', ['sales']));
+  }
+});
+
+test('get and delete tool collisions respect key gating in both operation representations', () => {
+  for (const enabled of [true, { enabled: true }]) {
+    const keyless = { entitySet: 'Orders', keys: [], operations: { get: enabled, delete: enabled } };
+    const keyed = { ...keyless, keys: [{ name: 'Id', type: 'string' }] };
+    const config = { server: { name: 's' }, apis: [{ name: 'a', destination: 'DEST', entitySets: [keyless, keyed] }] };
+    assert.doesNotThrow(() => parseApiConfig(config, 'cfg.json'));
+    config.apis[0].entitySets = [keyed, keyed];
+    assert.match(errorFor(config), /duplicate tool name "Orders_get"/);
+    assert.match(errorFor(config), /duplicate tool name "Orders_delete"/);
+  }
+});
+
+test('keyless list, create and update collisions are detected in both operation representations', () => {
+  for (const operation of ['list', 'create', 'update']) {
+    for (const enabled of [true, { enabled: true }]) {
+      const entity = { entitySet: 'Orders', keys: [], operations: { [operation]: enabled } };
+      const config = { server: { name: 's' }, apis: [{ name: 'a', destination: 'DEST', entitySets: [entity, entity] }] };
+      assert.ok(errorFor(config).includes(`duplicate tool name "Orders_${operation}"`));
+      config.apis[0].entitySets[0] = { ...entity, operations: { [operation]: { enabled: false } } };
+      assert.doesNotThrow(() => parseApiConfig(config, 'cfg.json'));
+    }
+  }
+});
+
+test('discovery resources ignore inactive definitions, including navigation-only and key-gated ones', () => {
+  for (const mode of ['search', 'hybrid']) {
+    for (const operations of [{}, { list: false }, { list: { enabled: false } }, { get: true, delete: { enabled: true } }]) {
+      const config = {
+        server: { name: 's' },
+        apis: [{ name: 'a', destination: 'DEST', entitySets: [
+          { entitySet: 'Orders', keys: [], operations, navigationProperties: [{ name: 'Items' }] },
+          { entitySet: 'Orders', keys: [], operations: { list: true } },
+        ] }],
+        discovery: { mode, alwaysRegister: ['Orders'] },
+      };
+      assert.doesNotThrow(() => parseApiConfig(config, 'cfg.json'));
+    }
+    const active = { entitySet: 'Orders', keys: [], operations: { list: true } };
+    assert.throws(() => parseApiConfig({
+      server: { name: 's' },
+      apis: [{ name: 'a', destination: 'DEST', entitySets: [active, active] }],
+      discovery: { mode },
+    }, 'cfg.json'), /duplicate resource URI "odata:\/\/a\/Orders"/);
+  }
+});
+
+test('search collapses cross-api entity tools but hybrid preserves genuine pinned collisions', () => {
+  const entity = { entitySet: 'Orders', keys: [], operations: { list: true } };
+  const config = {
+    server: { name: 's' },
+    apis: ['a', 'b'].map((name) => ({ name, destination: 'DEST', entitySets: [entity] })),
+  };
+  assert.doesNotThrow(() => parseApiConfig({ ...config, discovery: { mode: 'search' } }, 'cfg.json'));
+  for (const pin of ['Orders', 'a:Orders']) {
+    assert.throws(() => parseApiConfig({ ...config, discovery: { mode: 'hybrid', alwaysRegister: [pin] } }, 'cfg.json'), /duplicate tool name "Orders_list"/);
+  }
+});
+
+test('hybrid pins resolve only through category-enabled definitions with available operations', () => {
+  const config: ApiConfig = {
+    server: { name: 's', version: '1' },
+    apis: [
+      { name: 'a', destination: 'DEST', entitySets: [{ entitySet: 'Orders', description: '', category: 'sales', keys: [], operations: { list: true } }] },
+      { name: 'b', destination: 'DEST', entitySets: [{ entitySet: 'Orders', description: '', category: 'billing', keys: [], operations: { list: true } }] },
+    ],
+    discovery: { mode: 'hybrid', alwaysRegister: ['a:Orders'] },
+    ui: [{ tool: 'Orders_list', uri: 'ui://orders', template: 't.html' }],
+  };
+  assert.doesNotThrow(() => parseApiConfig(config, 'cfg.json', ['billing']));
+  config.apis[0].entitySets[0].operations = { get: true, delete: true };
+  assert.doesNotThrow(() => parseApiConfig(config, 'cfg.json'));
+  for (const pin of ['Orders', 'b:Orders']) {
+    config.discovery!.alwaysRegister = [pin];
+    assert.throws(() => parseApiConfig(config, 'cfg.json', ['billing']), /duplicate tool name "Orders_list"/);
+  }
+});
+
+test('hybrid registers navigation tools on siblings sharing a pinned entity name', () => {
+  const config = {
+    server: { name: 's' },
+    apis: [{ name: 'a', destination: 'DEST', entitySets: [
+      { entitySet: 'Orders', keys: [], operations: {}, navigationProperties: [{ name: 'Items' }] },
+      { entitySet: 'Orders', keys: [], operations: { list: true } },
+    ] }],
+    ui: [{ tool: 'Orders_Items_list', uri: 'ui://items', template: 't.html' }],
+  };
+  assert.doesNotThrow(() => parseApiConfig({ ...config, discovery: { mode: 'search' } }, 'cfg.json'));
+  assert.throws(() => parseApiConfig({ ...config, discovery: { mode: 'hybrid', alwaysRegister: ['Orders'] } }, 'cfg.json'), /duplicate tool name "Orders_Items_list"/);
+});
+
+test('UI collisions with discovery and overview remain fatal with no enabled entities', () => {
+  for (const mode of ['search', 'hybrid']) {
+    for (const tool of ['search_operations', 'execute_operation']) {
+      assert.throws(() => parseApiConfig({
+        server: { name: 's' }, apis: [], discovery: { mode },
+        ui: [{ tool, uri: 'ui://x', template: 't.html' }],
+      }, 'cfg.json', []), new RegExp(`duplicate tool name "${tool}"`));
+    }
+  }
+  assert.throws(() => parseApiConfig({
+    server: { name: 's' }, apis: [],
+    ui: [{ tool: 'UI_X', uri: 's://api/overview', template: 't.html' }],
+  }, 'cfg.json', []), /duplicate resource URI "s:\/\/api\/overview"/);
 });
 
 test('distinct entity set names are accepted', () => {

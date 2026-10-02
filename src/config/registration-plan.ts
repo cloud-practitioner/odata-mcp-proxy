@@ -23,8 +23,7 @@ function isEnabled(op: unknown): boolean {
   return false;
 }
 
-/** Tool names `registerEntityTools` would register for one entity set. */
-function entityToolNames(def: EntitySet): string[] {
+function operationToolNames(def: EntitySet): string[] {
   const es = def.entitySet;
   const keyed = def.keys.length > 0;
   const names: string[] = [];
@@ -33,7 +32,6 @@ function entityToolNames(def: EntitySet): string[] {
   if (isEnabled(def.operations.create)) names.push(`${es}_create`);
   if (isEnabled(def.operations.update)) names.push(`${es}_update`);
   if (isEnabled(def.operations.delete) && keyed) names.push(`${es}_delete`);
-  for (const nav of def.navigationProperties ?? []) names.push(`${es}_${nav.name}_list`);
   return names;
 }
 
@@ -42,14 +40,14 @@ function entityToolNames(def: EntitySet): string[] {
  * `alwaysRegister` resolution in `start()` (accepts "EntitySet" or
  * "api:EntitySet").
  */
-function resolvePinned(apiConfig: ApiConfig): Set<string> {
+function resolvePinned(apiConfig: ApiConfig, apis: ApiDefinition[]): Set<string> {
   const pinned = new Set<string>();
   if (apiConfig.discovery?.mode !== 'hybrid') return pinned;
   for (const name of apiConfig.discovery.alwaysRegister ?? []) {
     const [left, right] = name.includes(':') ? name.split(':', 2) : [undefined, name];
-    for (const api of apiConfig.apis) {
+    for (const api of apis) {
       for (const def of api.entitySets) {
-        if (def.entitySet === right && (left === undefined || api.name === left)) {
+        if (operationToolNames(def).length > 0 && def.entitySet === right && (left === undefined || api.name === left)) {
           pinned.add(def.entitySet);
         }
       }
@@ -58,24 +56,29 @@ function resolvePinned(apiConfig: ApiConfig): Set<string> {
   return pinned;
 }
 
-/**
- * Enumerate every MCP tool name and resource URI a config generates across all
- * APIs, UI views and (if configured) progressive discovery. Category filtering
- * is intentionally ignored: the maximal, unfiltered set is validated so a
- * collision is never hidden behind an `ENABLED_API_CATEGORIES` value.
- */
-export function collectRegistrationNames(apiConfig: ApiConfig): { tools: string[]; resources: string[] } {
+export function collectRegistrationNames(
+  apiConfig: ApiConfig,
+  enabledCategories: string[] = ['all'],
+): { tools: string[]; resources: string[] } {
   const tools: string[] = [];
   const resources: string[] = [];
+  const isAll = enabledCategories.length === 1 && enabledCategories[0] === 'all';
+  const apis = apiConfig.apis.map((api) => ({
+    ...api,
+    entitySets: api.entitySets.filter((def) => isAll || enabledCategories.includes(def.category)),
+  }));
   const discovery = apiConfig.discovery;
-  const pinned = discovery ? resolvePinned(apiConfig) : undefined;
+  const pinned = discovery ? resolvePinned(apiConfig, apis) : undefined;
 
-  for (const api of apiConfig.apis) {
+  for (const api of apis) {
     for (const def of api.entitySets) {
+      const operations = operationToolNames(def);
       const keepEntityTools = !discovery || (discovery.mode === 'hybrid' && pinned!.has(def.entitySet));
-      if (keepEntityTools) tools.push(...entityToolNames(def));
-      // Discovery registers one schema resource per entity set.
-      if (discovery) resources.push(`odata://${api.name}/${def.entitySet}`);
+      if (keepEntityTools) {
+        tools.push(...operations);
+        for (const nav of def.navigationProperties ?? []) tools.push(`${def.entitySet}_${nav.name}_list`);
+      }
+      if (discovery && operations.length > 0) resources.push(`odata://${api.name}/${def.entitySet}`);
     }
   }
 
@@ -106,7 +109,10 @@ function duplicates(items: string[]): string[] {
  * Duplicate generated tool names and resource URIs for a config. A non-empty
  * result means the config would crash the per-session factory on first use.
  */
-export function findDuplicateRegistrations(apiConfig: ApiConfig): { tools: string[]; resources: string[] } {
-  const { tools, resources } = collectRegistrationNames(apiConfig);
+export function findDuplicateRegistrations(
+  apiConfig: ApiConfig,
+  enabledCategories: string[] = ['all'],
+): { tools: string[]; resources: string[] } {
+  const { tools, resources } = collectRegistrationNames(apiConfig, enabledCategories);
   return { tools: duplicates(tools), resources: duplicates(resources) };
 }

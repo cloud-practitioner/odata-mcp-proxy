@@ -13,15 +13,14 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { createServer } from 'node:net';
 
 const rootDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 const serverEntry = join(rootDir, 'dist', 'index.js');
 
-/** Boot the built server over stdio with a written config + env, return exit. */
 function boot(config: unknown, extraEnv: Record<string, string> = {}, timeoutMs = 30_000): { status: number | null; output: string; file: string } {
   assert.ok(existsSync(serverEntry), 'dist/index.js missing — run `npm run build` first');
-  const dir = mkdtempSync(join(tmpdir(), 'odata-mcp-proxy-startup-'));
+  const dir = mkdtempSync(join(rootDir, '.startup-test-'));
   const file = join(dir, 'api-config.json');
   try {
     writeFileSync(file, JSON.stringify(config));
@@ -71,7 +70,30 @@ test('a known ENABLED_API_CATEGORIES value does not trip the check (F12)', () =>
   assert.ok(!output.includes('ENABLED_API_CATEGORIES references'), output);
 });
 
-test('a UI view referencing an unknown api fails startup via the self-check (F10)', () => {
+test('startup accepts duplicate entity names when only one category is enabled (F10)', () => {
+  const config = {
+    ...categorisedConfig,
+    apis: [
+      ...categorisedConfig.apis,
+      {
+        name: 'b', destination: 'DEST_B',
+        entitySets: categorisedConfig.apis[0].entitySets.map((entity) => ({ ...entity, category: 'artifacts' })),
+      },
+    ],
+  };
+  const { output } = boot(config, { ENABLED_API_CATEGORIES: 'monitoring', LOG_LEVEL: 'info' }, 10_000);
+  assert.ok(output.includes('running on stdio transport'), output);
+  assert.ok(!output.includes('duplicate tool name'), output);
+});
+
+test('a UI view referencing an unknown api fails HTTP startup before listening (F10)', async () => {
+  const probe = createServer();
+  await new Promise<void>((resolve) => probe.listen(0, '127.0.0.1', resolve));
+  const address = probe.address();
+  assert.ok(address && typeof address === 'object');
+  const port = address.port;
+  await new Promise<void>((resolve, reject) => probe.close((error) => error ? reject(error) : resolve()));
+
   const config = {
     server: { name: 's' },
     apis: [{
@@ -81,7 +103,10 @@ test('a UI view referencing an unknown api fails startup via the self-check (F10
     }],
     ui: [{ tool: 'UI_X', uri: 'ui://x', template: 't.html', data: { src: { api: 'nope', path: '/x' } } }],
   };
-  const { status, output } = boot(config);
-  assert.notEqual(status, 0);
+  const { status, output } = boot(config, {
+    MCP_TRANSPORT: 'http', PORT: String(port), LOG_LEVEL: 'info', ENABLED_API_CATEGORIES: 'all',
+  });
+  assert.equal(status, 1, output);
   assert.ok(output.includes('references unknown api "nope"'), output);
+  assert.ok(!output.includes('HTTP server listening'), output);
 });
