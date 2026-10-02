@@ -36,8 +36,9 @@
   "dependencies": {
     "@mcp-ui/server": "^6.1.0",
     "@modelcontextprotocol/sdk": "^1.17.1",
-    "@sap-cloud-sdk/connectivity": "^4.0.0",
-    "@sap-cloud-sdk/http-client": "^4.0.0",
+    "@sap-cloud-sdk/connectivity": "4.2.0",
+    "@sap-cloud-sdk/http-client": "4.2.0",
+    "@sap-cloud-sdk/resilience": "4.5.1",
     "@sap-cloud-sdk/util": "^4.0.0",
     "@sap/xsenv": "^4.0.0",
     "@sap/xssec": "^3.6.2",
