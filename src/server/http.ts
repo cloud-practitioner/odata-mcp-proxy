@@ -67,13 +67,6 @@ export function createHttpServer(port: number, auth: XsuaaAuth): Express {
   const app = express();
 
   // ---------------------------------------------------------------------------
-  // Body parsing
-  // ---------------------------------------------------------------------------
-  app.use(express.json());
-  // OAuth token endpoints receive application/x-www-form-urlencoded bodies.
-  app.use(express.urlencoded({ extended: false }));
-
-  // ---------------------------------------------------------------------------
   // CORS
   // ---------------------------------------------------------------------------
   const isProduction = process.env.NODE_ENV === 'production';
@@ -98,11 +91,30 @@ export function createHttpServer(port: number, auth: XsuaaAuth): Express {
   // ---------------------------------------------------------------------------
   // JWT extraction / optional XSUAA validation
   //
-  // Attaches req.auth (for the MCP SDK) and req.jwtToken when a valid Bearer
-  // token is present. When XSUAA is configured the token is validated; invalid
-  // tokens are silently dropped so local / stdio development still works.
+  // Keep authentication before route-scoped upload parsing so unauthenticated
+  // callers cannot force large-body buffering when XSUAA is bound. See
+  // XsuaaAuth.requireAuth() for token rejection and request token attachment.
   // ---------------------------------------------------------------------------
   app.use('/mcp', auth.requireAuth() as unknown as (req: Request, res: Response, next: NextFunction) => void);
+
+  app.all('/mcp', express.json({ limit: '50mb' }), (err: Error & { type?: string }, req: Request, res: Response, next: NextFunction) => {
+    if (res.headersSent || err.type !== 'entity.too.large') {
+      next(err);
+      return;
+    }
+    logger.warn('Request body exceeds limit', { limit: '50mb', url: req.originalUrl });
+    res.status(413).json({
+      jsonrpc: '2.0',
+      error: {
+        code: -32600,
+        message: 'Request body too large: exceeds the limit of 50mb.',
+      },
+      id: null,
+    });
+  });
+
+  app.use(express.json());
+  app.use(express.urlencoded({ extended: false }));
 
   // ---------------------------------------------------------------------------
   // Request logging

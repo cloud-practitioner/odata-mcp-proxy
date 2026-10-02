@@ -12,7 +12,7 @@ import { realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { config, apiConfig, apiConfigDir, resolveOperation, type Config, type ApiConfig, type ApiDefinition } from './config/index.js';
-import { initLogger, logger } from './utils/logger.js';
+import { initLogger, logger, routeSdkLoggingToStderr } from './utils/logger.js';
 import { resolveDestination } from './client/destination-service.js';
 import { ODataClient } from './client/odata-client.js';
 import { createMcpServer } from './server/mcp-server.js';
@@ -70,6 +70,13 @@ export async function start(options: StartOptions = {}): Promise<void> {
   // ── 1. Initialize logger with configured level ────────────────────────────
 
   initLogger(config.logLevel);
+
+  // Over stdio, stdout is the MCP JSON-RPC channel. The SAP Cloud SDK logs
+  // through its own Winston logger whose default transport writes to stdout,
+  // so redirect it to stderr before any OData/CSRF call can emit a log line.
+  if (config.mcpTransport === 'stdio') {
+    routeSdkLoggingToStderr();
+  }
   logger.info(`Starting ${apiConfig.server.name}`, {
     transport: config.mcpTransport,
     port: config.mcpTransport === 'http' ? config.port : 'N/A',

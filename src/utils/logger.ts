@@ -1,4 +1,5 @@
 import winston from 'winston';
+import { setGlobalTransports } from '@sap-cloud-sdk/util';
 
 const { combine, timestamp, printf, colorize, json, errors } = winston.format;
 
@@ -74,4 +75,21 @@ export let logger: winston.Logger = createLogger();
  */
 export function initLogger(level: string): void {
   logger = createLogger(level);
+}
+
+/**
+ * Point the SAP Cloud SDK's independent Winston logger at stderr.
+ *
+ * The SDK logs through its own logger whose default Console transport writes to
+ * stdout. Over stdio that stream carries the MCP JSON-RPC protocol, so a single
+ * SDK log line — e.g. the warning emitted when a CSRF token fetch fails —
+ * corrupts the channel and breaks `JSON.parse` in a strict MCP stdio client.
+ * Setting the SDK's global transports to a stderr-only Console keeps every SDK
+ * log line off stdout. Call this once, early, whenever stdout must stay pure
+ * JSON-RPC (i.e. in stdio transport mode).
+ */
+export function routeSdkLoggingToStderr(): void {
+  setGlobalTransports(
+    new winston.transports.Console({ stderrLevels: Object.keys(winston.config.npm.levels) }),
+  );
 }
