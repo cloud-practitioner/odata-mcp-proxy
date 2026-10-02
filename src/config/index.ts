@@ -44,14 +44,6 @@ const configSchema = z.object({
     .default(60000),
 
   apiConfigFile: z.string().default('api-config.json'),
-
-  /**
-   * Maximum accepted HTTP request body size (Express `express.json` limit).
-   * The default 100 kb rejects base64-encoded iFlow uploads, so raise it to a
-   * size that comfortably holds real artifact zips. Accepts any byte string
-   * understood by the `bytes` package (e.g. "50mb").
-   */
-  bodyLimit: z.string().default("50mb"),
 });
 
 /** Inferred type from the raw Zod schema (enabledApiCategories is still a string). */
@@ -99,7 +91,6 @@ export function loadConfig(): Config {
     enabledApiCategories: process.env.ENABLED_API_CATEGORIES,
     requestTimeout: process.env.REQUEST_TIMEOUT,
     apiConfigFile: process.env.API_CONFIG_FILE,
-    bodyLimit: process.env.MCP_BODY_LIMIT,
   };
 
   const result = configSchema.safeParse(rawInput);

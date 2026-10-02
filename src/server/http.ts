@@ -24,7 +24,6 @@
 import { randomUUID } from 'node:crypto';
 import express, { type Express, type Request, type Response, type NextFunction } from 'express';
 import cors from 'cors';
-import { config } from '../config/index.js';
 import { logger } from '../utils/logger.js';
 import { type XsuaaAuth } from '../auth/xsuaa-auth.js';
 
@@ -68,51 +67,6 @@ export function createHttpServer(port: number, auth: XsuaaAuth): Express {
   const app = express();
 
   // ---------------------------------------------------------------------------
-  // Body parsing
-  //
-  // The default 100 kb limit rejects base64-encoded artifact uploads (a ~75 kb
-  // iFlow zip already exceeds it) with an opaque Express HTML 413 before the
-  // request reaches MCP. Raise the limit to match the SDK's upload capacity;
-  // the error handler below turns an over-limit body into a JSON MCP error
-  // rather than Express's HTML page.
-  // ---------------------------------------------------------------------------
-  app.use(express.json({ limit: config.bodyLimit }));
-  // OAuth token endpoints receive application/x-www-form-urlencoded bodies.
-  app.use(express.urlencoded({ extended: false }));
-
-  // Body-parser error handler: a payload over the limit, or malformed JSON,
-  // reaches here as a 4-arg error middleware. Respond with a JSON-RPC error so
-  // MCP clients get a parseable body instead of Express's default HTML 413/400.
-  app.use((err: Error & { type?: string; status?: number; statusCode?: number }, req: Request, res: Response, next: NextFunction) => {
-    if (res.headersSent) {
-      next(err);
-      return;
-    }
-    const status = err.status ?? err.statusCode;
-    if (err.type === 'entity.too.large' || status === 413) {
-      logger.warn('Request body exceeds configured limit', { limit: config.bodyLimit, url: req.originalUrl });
-      res.status(413).json({
-        jsonrpc: '2.0',
-        error: {
-          code: -32600,
-          message: `Request body too large: exceeds the configured limit of ${config.bodyLimit}. Set MCP_BODY_LIMIT to raise it.`,
-        },
-        id: null,
-      });
-      return;
-    }
-    if (err.type === 'entity.parse.failed' || status === 400) {
-      res.status(400).json({
-        jsonrpc: '2.0',
-        error: { code: -32700, message: 'Parse error: request body is not valid JSON.' },
-        id: null,
-      });
-      return;
-    }
-    next(err);
-  });
-
-  // ---------------------------------------------------------------------------
   // CORS
   // ---------------------------------------------------------------------------
   const isProduction = process.env.NODE_ENV === 'production';
@@ -142,6 +96,25 @@ export function createHttpServer(port: number, auth: XsuaaAuth): Express {
   // tokens are silently dropped so local / stdio development still works.
   // ---------------------------------------------------------------------------
   app.use('/mcp', auth.requireAuth() as unknown as (req: Request, res: Response, next: NextFunction) => void);
+
+  app.all('/mcp', express.json({ limit: '50mb' }), (err: Error & { type?: string }, req: Request, res: Response, next: NextFunction) => {
+    if (res.headersSent || err.type !== 'entity.too.large') {
+      next(err);
+      return;
+    }
+    logger.warn('Request body exceeds limit', { limit: '50mb', url: req.originalUrl });
+    res.status(413).json({
+      jsonrpc: '2.0',
+      error: {
+        code: -32600,
+        message: 'Request body too large: exceeds the limit of 50mb.',
+      },
+      id: null,
+    });
+  });
+
+  app.use(express.json());
+  app.use(express.urlencoded({ extended: false }));
 
   // ---------------------------------------------------------------------------
   // Request logging

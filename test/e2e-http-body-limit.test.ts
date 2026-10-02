@@ -1,28 +1,20 @@
-// Regression test for F8: over HTTP the default Express body limit (100 kb)
-// rejects base64-encoded artifact uploads with an opaque HTML 413 before the
-// request reaches MCP. This boots the built server (dist/index.js) over the HTTP
-// transport against a local CPI stub with MCP_BODY_LIMIT=1mb and asserts:
-//   1. a ~300 kb base64 artifact body (over the old 100 kb default) is accepted
-//      and reaches the backend, and
-//   2. an over-limit body returns a JSON MCP error (jsonrpc "2.0"), not Express's
-//      HTML 413 page.
 // Run `npm run build` first.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { createServer, type Server, type IncomingMessage } from 'node:http';
+import { createServer, request, type Server, type IncomingMessage } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { existsSync } from 'node:fs';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { XsuaaAuth } from '../src/auth/xsuaa-auth.js';
+import { createHttpServer } from '../src/server/http.js';
 
 const rootDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 const configPath = join(rootDir, 'test', 'fixtures', 'e2e-binary-config.json');
 const serverEntry = join(rootDir, 'dist', 'index.js');
-
-const BODY_LIMIT = '1mb';
 
 let cpiStub: Server;
 let cpiBaseUrl: string;
@@ -96,7 +88,7 @@ before(async () => {
       ...env,
       MCP_TRANSPORT: 'http',
       PORT: String(serverPort),
-      MCP_BODY_LIMIT: BODY_LIMIT,
+      CORS_ORIGIN: 'https://mcp-client.example',
       API_CONFIG_FILE: configPath,
       LOG_LEVEL: 'error',
       E2E_BINARY_DEST_BASE_URL: cpiBaseUrl,
@@ -114,7 +106,6 @@ after(() => {
 });
 
 test('a large base64 artifact body (over the old 100 kb default) is accepted and reaches the backend', async () => {
-  // 300 kb of base64 — comfortably over Express's 100 kb default, under 1mb.
   const artifactBytes = Buffer.alloc(225 * 1024, 0xab);
   const artifactContent = artifactBytes.toString('base64');
   assert.ok(artifactContent.length > 100 * 1024, 'test body must exceed the old 100 kb default');
@@ -137,8 +128,7 @@ test('a large base64 artifact body (over the old 100 kb default) is accepted and
 });
 
 test('an over-limit body returns a JSON MCP error, not an HTML 413', async () => {
-  // ~2 MB JSON body — over the 1mb limit.
-  const huge = 'a'.repeat(2 * 1024 * 1024);
+  const huge = 'a'.repeat(51 * 1024 * 1024);
   const payload = JSON.stringify({
     jsonrpc: '2.0',
     id: 1,
@@ -148,11 +138,16 @@ test('an over-limit body returns a JSON MCP error, not an HTML 413', async () =>
 
   const res = await fetch(`http://127.0.0.1:${serverPort}/mcp`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+    headers: {
+      'content-type': 'application/json',
+      accept: 'application/json, text/event-stream',
+      origin: 'https://mcp-client.example',
+    },
     body: payload,
   });
 
   assert.equal(res.status, 413, 'over-limit body must yield 413');
+  assert.equal(res.headers.get('access-control-allow-origin'), 'https://mcp-client.example');
   const contentType = res.headers.get('content-type') ?? '';
   assert.match(contentType, /application\/json/, `expected JSON content type, got: ${contentType}`);
 
@@ -162,4 +157,84 @@ test('an over-limit body returns a JSON MCP error, not an HTML 413', async () =>
   assert.equal(json.jsonrpc, '2.0', 'error must be a JSON-RPC envelope');
   assert.ok(typeof json.error?.code === 'number', 'error must carry a numeric code');
   assert.match(json.error?.message ?? '', /too large/i, 'message should explain the size limit');
+});
+
+test('XSUAA rejects unfinished large MCP bodies before parsing', async () => {
+  const previousServices = process.env.VCAP_SERVICES;
+  let auth: XsuaaAuth;
+  try {
+    process.env.VCAP_SERVICES = JSON.stringify({
+      xsuaa: [{ label: 'xsuaa', credentials: { clientid: 'id', clientsecret: 'secret', url: 'https://xsuaa.example' } }],
+    });
+    auth = new XsuaaAuth();
+  } finally {
+    if (previousServices === undefined) delete process.env.VCAP_SERVICES;
+    else process.env.VCAP_SERVICES = previousServices;
+  }
+  assert.equal(auth.isConfigured(), true);
+  const server = createServer(createHttpServer(0, auth));
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = (server.address() as AddressInfo).port;
+  try {
+    for (const method of ['POST', 'GET', 'DELETE']) {
+      for (const path of ['/mcp', '/mcp/']) {
+        const status = await new Promise<number | undefined>((resolve, reject) => {
+          const req = request({
+            host: '127.0.0.1',
+            port,
+            path,
+            method,
+            headers: { 'content-type': 'application/json', 'content-length': String(49 * 1024 * 1024) },
+          }, (res) => {
+            res.resume();
+            res.on('end', () => {
+              req.destroy();
+              resolve(res.statusCode);
+            });
+          });
+          req.on('error', reject);
+          req.setTimeout(2000, () => req.destroy(new Error('Authentication waited for the body')));
+          req.flushHeaders();
+        });
+        assert.equal(status, 401, `${method} ${path} must reject before reading the body`);
+      }
+    }
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test('public and unmatched routes retain the default JSON body limit', async () => {
+  const body = JSON.stringify({ pad: 'a'.repeat(200 * 1024) });
+  for (const path of ['/health', '/oauth/token', '/oauth/refresh', '/oauth/client-registration', '/missing', '/mcp/unmatched']) {
+    const res = await fetch(`http://127.0.0.1:${serverPort}${path}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body,
+    });
+    assert.equal(res.status, 413, `${path} must retain the default limit`);
+    assert.match(res.headers.get('content-type') ?? '', /text\/html/);
+    await res.text();
+  }
+});
+
+test('non-size JSON errors and URL-encoded parameter errors retain Express responses', async () => {
+  for (const { body, contentType, status } of [
+    { body: '{', contentType: 'application/json', status: 400 },
+    {
+      body: Array.from({ length: 1001 }, (_, i) => `p${i}=x`).join('&'),
+      contentType: 'application/x-www-form-urlencoded',
+      status: 413,
+    },
+  ]) {
+    const res = await fetch(`http://127.0.0.1:${serverPort}/mcp`, {
+      method: 'POST',
+      headers: { 'content-type': contentType },
+      body,
+    });
+    assert.equal(res.status, status);
+    assert.match(res.headers.get('content-type') ?? '', /text\/html/);
+    await res.text();
+  }
 });
