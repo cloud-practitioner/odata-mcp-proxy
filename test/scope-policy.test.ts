@@ -275,16 +275,27 @@ test('XSUAA: get on a keyless entity set does not grant the navigation', async (
   assert.deepEqual(allowed, { 'nav tool': false, _list: false, 'execute_operation list': false });
 });
 
-test('navigation tools are not registered without an enabled read operation', async () => {
+test('without an enabled read operation the navigation tool is refused only when enforcing', async () => {
   for (const def of [
     packagesWith({ list: false, get: false, create: { enabled: true, requiredScope: 'write' } }),
     packagesWith({ get: true, create: true }, false),
   ]) {
-    const { mcp, server } = await connect((s) =>
-      registerAllTools(s, fakeClient([]), [def], ['all'], undefined, { enforceScopes: false }));
-    const { tools } = await mcp.listTools();
-    assert.ok(!tools.some((t) => t.name === NAV_TOOL), tools.map((t) => t.name).join(', '));
-    assert.ok(tools.some((t) => t.name === 'IntegrationPackages_create'));
-    await server.close();
+    const calls: string[] = [];
+    const open = await connect((s) =>
+      registerAllTools(s, fakeClient(calls), [def], ['all'], undefined, { enforceScopes: false }));
+    const allowed = await open.mcp.callTool({ name: NAV_TOOL, arguments: { path: "('P')" } }) as Result;
+    assert.ok(!allowed.isError, allowed.content[0].text);
+    assert.deepEqual(calls, [NAV_URL]);
+    await open.server.close();
+
+    for (const token of [jwtWith(['app.write', 'app.read']), undefined]) {
+      const enforced = await connect((s) =>
+        registerAllTools(s, fakeClient(calls), [def], ['all'], undefined, { enforceScopes: true }), token);
+      const refused = await enforced.mcp.callTool({ name: NAV_TOOL, arguments: { path: "('P')" } }) as Result;
+      assert.equal(refused.isError, true);
+      assert.match(refused.content[0].text!, /Forbidden: no enabled read operation grants this call/);
+      await enforced.server.close();
+    }
+    assert.deepEqual(calls, [NAV_URL], 'a refused navigation call must not reach the backend');
   }
 });

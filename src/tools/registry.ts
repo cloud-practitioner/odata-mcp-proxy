@@ -198,16 +198,19 @@ export function authorize(
  * Apply the scope policy to a call that any one of several operations grants:
  * it passes when {@link authorize} passes for at least one of
  * `requiredScopes` (an `undefined` entry is an unrestricted operation, so it
- * always passes). Navigation tools use this with the parent's read operations.
+ * always passes). An empty list means no operation grants the call, which is
+ * refused only when scopes are enforced. Navigation tools use this with the
+ * parent's read operations.
  */
 function authorizeAnyOf(
   requiredScopes: (string | undefined)[],
   jwt: string | undefined,
   options: ScopeOptions,
 ): void {
+  if (options.enforceScopes === false) return;
   const distinct = [...new Set(requiredScopes)];
   if (distinct.length === 0) {
-    throw new Error('Forbidden: no operation grants this call');
+    throw new Error('Forbidden: no enabled read operation grants this call');
   }
   let firstError: unknown;
   for (const scope of distinct) {
@@ -353,35 +356,26 @@ export function registerEntityTools(
   // allowed exactly when one of those read paths would be: the caller holds
   // the requiredScope of the enabled list or the enabled keyed get (either
   // one suffices; an unscoped one makes the navigation unscoped). Without any
-  // such read operation there is no equivalent read path, so the navigation
-  // tools are not registered.
+  // such read operation no read path grants the call, so it is refused when
+  // scopes are enforced and allowed otherwise.
   const navReadScopes = [
     ...(opList.enabled ? [opList.requiredScope] : []),
     ...(opGet.enabled && keys.length > 0 ? [opGet.requiredScope] : []),
   ];
-  const registeredNavProps: string[] = [];
 
-  if (navigationProperties && navigationProperties.length > 0) {
-    if (navReadScopes.length === 0) {
-      logger.info(
-        `Skipping navigation tools for ${entitySet}: no enabled read operation ` +
-        '(list, or get on a keyed entity set) to derive their scope from',
+  if (navigationProperties) {
+    for (const nav of navigationProperties) {
+      server.tool(
+        `${entitySet}_${nav.name}_list`,
+        `Get ${nav.description ?? nav.name} for a specific ${description} (GET). ` +
+          `Provide the parent entity key(s) in path, then /${nav.name} is appended automatically.${keyHint}`,
+        genericToolSchema,
+        async (args, extra) => {
+          try { authorizeAnyOf(navReadScopes, extra.authInfo?.token, scopeOptions); }
+          catch (e) { return formatToolError(e instanceof Error ? e.message : String(e)); }
+          return handleToolCall(client, 'GET', urlPath, nav.name, args, extra.authInfo?.token);
+        },
       );
-    } else {
-      for (const nav of navigationProperties) {
-        server.tool(
-          `${entitySet}_${nav.name}_list`,
-          `Get ${nav.description ?? nav.name} for a specific ${description} (GET). ` +
-            `Provide the parent entity key(s) in path, then /${nav.name} is appended automatically.${keyHint}`,
-          genericToolSchema,
-          async (args, extra) => {
-            try { authorizeAnyOf(navReadScopes, extra.authInfo?.token, scopeOptions); }
-            catch (e) { return formatToolError(e instanceof Error ? e.message : String(e)); }
-            return handleToolCall(client, 'GET', urlPath, nav.name, args, extra.authInfo?.token);
-          },
-        );
-        registeredNavProps.push(nav.name);
-      }
     }
   }
 
@@ -389,7 +383,7 @@ export function registerEntityTools(
     operations: (Object.entries(operations) as [string, OperationDefinition | undefined][])
       .filter(([, v]) => resolveOperation(v).enabled)
       .map(([k]) => k),
-    navProps: registeredNavProps,
+    navProps: navigationProperties?.map((n) => n.name) ?? [],
   });
 }
 
