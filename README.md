@@ -46,7 +46,7 @@ The server resolves a BTP Destination at startup to obtain the Cloud Integration
 
 ## Prerequisites
 
-- **Node.js** 20+ (18+ minimum, 20+ recommended)
+- **Node.js** 22.x
 - **SAP BTP account** with a Cloud Foundry environment
 - **SAP Integration Suite** tenant (Cloud Integration capability)
 - **BTP Destination** configured to point to your Cloud Integration tenant's OData API with OAuth2 authentication
