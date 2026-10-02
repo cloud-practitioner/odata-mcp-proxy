@@ -70,11 +70,8 @@ function buildApiOverviewMarkdown(
   serverName: string,
   enabledCategories: string[],
 ): string {
-  // Only document entity sets in an enabled category that expose at least one
-  // actually-available operation, so the overview never advertises a tool that
-  // was not registered.
   const visible = definitions.filter(
-    (def) => isCategoryEnabled(def.category, enabledCategories) && availableOperations(def).length > 0,
+    (def) => isCategoryEnabled(def.category, enabledCategories),
   );
 
   // Group definitions by category while preserving insertion order.
@@ -159,7 +156,7 @@ export function registerApiDocResources(
   server: McpServer,
   definitions: EntitySetDefinition[],
   serverName: string,
-  enabledCategories: string[],
+  enabledCategories: string[] = ['all'],
 ): void {
   const markdown = buildApiOverviewMarkdown(definitions, serverName, enabledCategories);
 

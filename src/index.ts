@@ -268,18 +268,17 @@ export async function start(options: StartOptions = {}): Promise<void> {
     const app = createHttpServer(config.port, xsuaa!);
 
     // Active sessions (sessionId -> transport + server) for stateful mode.
-    // The store evicts and closes sessions idle past the configured TTL so a
-    // client that disconnects without DELETE cannot leak its server/transport.
     type Session = {
       transport: InstanceType<typeof StreamableHTTPServerTransport>;
       server: McpServer;
     };
+    const SESSION_IDLE_TTL_MS = 30 * 60 * 1000;
     const sessions = new SessionStore<Session>(
-      config.sessionIdleTtlMs,
+      SESSION_IDLE_TTL_MS,
       (s) => s.server.close(),
     );
     // Sweep at the TTL cadence, capped so eviction stays reasonably prompt.
-    sessions.startSweeping(Math.max(1000, Math.min(config.sessionIdleTtlMs, 60_000)));
+    sessions.startSweeping(Math.min(SESSION_IDLE_TTL_MS, 60_000));
 
     // Handler for POST /mcp — initialization and JSON-RPC requests
     app.post('/mcp', async (req, res) => {
@@ -351,9 +350,15 @@ export async function start(options: StartOptions = {}): Promise<void> {
     app.get('/mcp', async (req, res) => {
       const sessionId = req.headers['mcp-session-id'] as string | undefined;
 
-      if (!sessionId || !sessions.has(sessionId)) {
-        // Unknown or missing session: the spec expects 404 so the client knows
-        // to start a fresh session rather than treating it as a bad request.
+      if (sessionId === undefined) {
+        res.status(400).json({
+          error: 'Bad Request',
+          message: 'Missing or invalid mcp-session-id header.',
+        });
+        return;
+      }
+
+      if (!sessions.has(sessionId)) {
         res.status(404).json({
           jsonrpc: '2.0',
           error: { code: -32001, message: 'Session not found' },
@@ -370,9 +375,15 @@ export async function start(options: StartOptions = {}): Promise<void> {
     app.delete('/mcp', async (req, res) => {
       const sessionId = req.headers['mcp-session-id'] as string | undefined;
 
-      if (!sessionId || !sessions.has(sessionId)) {
-        // Unknown or missing session: the spec expects 404 so the client knows
-        // to start a fresh session rather than treating it as a bad request.
+      if (sessionId === undefined) {
+        res.status(400).json({
+          error: 'Bad Request',
+          message: 'Missing or invalid mcp-session-id header.',
+        });
+        return;
+      }
+
+      if (!sessions.has(sessionId)) {
         res.status(404).json({
           jsonrpc: '2.0',
           error: { code: -32001, message: 'Session not found' },

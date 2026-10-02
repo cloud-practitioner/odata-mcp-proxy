@@ -43,13 +43,6 @@ const configSchema = z.object({
     .positive()
     .default(60000),
 
-  // Idle TTL (ms) after which an inactive HTTP session is evicted and closed.
-  sessionIdleTtlMs: z.coerce
-    .number()
-    .int()
-    .positive()
-    .default(1800000),
-
   apiConfigFile: z.string().default('api-config.json'),
 });
 
@@ -97,7 +90,6 @@ export function loadConfig(): Config {
     logLevel: process.env.LOG_LEVEL,
     enabledApiCategories: process.env.ENABLED_API_CATEGORIES,
     requestTimeout: process.env.REQUEST_TIMEOUT,
-    sessionIdleTtlMs: process.env.SESSION_IDLE_TTL_MS,
     apiConfigFile: process.env.API_CONFIG_FILE,
   };
 

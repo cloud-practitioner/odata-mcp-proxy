@@ -58,7 +58,6 @@ before(async () => {
       PORT: String(PORT),
       API_CONFIG_FILE: configPath,
       LOG_LEVEL: 'error',
-      SESSION_IDLE_TTL_MS: '1000',
     },
     stdio: ['ignore', 'ignore', 'inherit'],
   });
@@ -86,21 +85,36 @@ test('initialize ignores a client-supplied session id and generates its own', as
   assert.notEqual(assigned, clientChosen, 'server must not reuse the client-supplied id');
 });
 
-test('GET /mcp with an unknown session id returns 404', async () => {
-  const res = await fetch(`${BASE}/mcp`, {
-    method: 'GET',
-    headers: {
-      accept: 'text/event-stream',
-      'mcp-session-id': 'does-not-exist',
-    },
+for (const method of ['GET', 'DELETE']) {
+  test(`${method} /mcp without a session id returns 400`, async () => {
+    const res = await fetch(`${BASE}/mcp`, {
+      method,
+      headers: { accept: 'text/event-stream' },
+    });
+    assert.equal(res.status, 400);
+    assert.deepEqual(await res.json(), {
+      error: 'Bad Request',
+      message: 'Missing or invalid mcp-session-id header.',
+    });
   });
-  assert.equal(res.status, 404);
-});
+}
 
-test('DELETE /mcp with an unknown session id returns 404', async () => {
-  const res = await fetch(`${BASE}/mcp`, {
-    method: 'DELETE',
-    headers: { 'mcp-session-id': 'does-not-exist' },
-  });
-  assert.equal(res.status, 404);
-});
+for (const method of ['GET', 'DELETE']) {
+  for (const sessionId of ['does-not-exist', '']) {
+    test(`${method} /mcp with an unknown session id ${JSON.stringify(sessionId)} returns 404`, async () => {
+      const res = await fetch(`${BASE}/mcp`, {
+        method,
+        headers: {
+          accept: 'text/event-stream',
+          'mcp-session-id': sessionId,
+        },
+      });
+      assert.equal(res.status, 404);
+      assert.deepEqual(await res.json(), {
+        jsonrpc: '2.0',
+        error: { code: -32001, message: 'Session not found' },
+        id: null,
+      });
+    });
+  }
+}

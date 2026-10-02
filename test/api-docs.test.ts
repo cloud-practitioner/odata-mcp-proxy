@@ -24,7 +24,7 @@ interface Captured {
 function captureRegistration(
   definitions: EntitySetDefinition[],
   serverName: string,
-  enabledCategories: string[],
+  ...categoryFilter: [enabledCategories?: string[]],
 ): Captured {
   let captured: Captured | undefined;
   const server = {
@@ -33,7 +33,7 @@ function captureRegistration(
     },
   } as unknown as McpServer;
 
-  registerApiDocResources(server, definitions, serverName, enabledCategories);
+  registerApiDocResources(server, definitions, serverName, ...categoryFilter);
   assert.ok(captured, 'a resource must be registered');
   return captured;
 }
@@ -101,6 +101,51 @@ test('overview lists only enabled, key-gated, category-filtered operations', asy
   // The disabled category is not documented at all.
   assert.equal(operationsLine(markdown, 'SecretStuff'), undefined);
   assert.ok(!markdown.includes('Secret'), 'disabled-category entity set must be omitted');
+});
+
+test('omitted and undefined category filters preserve three-argument registration', async () => {
+  const definitions = [
+    def({ entitySet: 'Packages', category: 'integration-content', operations: { list: true } }),
+    def({ entitySet: 'Credentials', category: 'security-content', operations: { list: true } }),
+  ];
+
+  for (const captured of [
+    captureRegistration(definitions, 'cpi'),
+    captureRegistration(definitions, 'cpi', undefined),
+  ]) {
+    const markdown = await renderMarkdown(captured);
+    assert.equal(operationsLine(markdown, 'Packages'), 'list');
+    assert.equal(operationsLine(markdown, 'Credentials'), 'list');
+  }
+});
+
+test('enabled entity sets retain key and navigation guidance without CRUD operations', async () => {
+  const definitions = [
+    def({
+      entitySet: 'NavigationOnly',
+      category: 'integration-content',
+      keys: [{ name: 'Id', type: 'string' }],
+      navigationProperties: [{ name: 'Resources', isCollection: true, description: 'Package resources' }],
+    }),
+    def({
+      entitySet: 'DisabledCrud',
+      category: 'integration-content',
+      operations: { list: false, get: { enabled: false }, create: false, update: false, delete: false },
+    }),
+    def({
+      entitySet: 'HiddenNavigation',
+      category: 'security-content',
+      navigationProperties: [{ name: 'Secrets' }],
+    }),
+  ];
+  const markdown = await renderMarkdown(captureRegistration(definitions, 'cpi', ['integration-content']));
+
+  assert.equal(operationsLine(markdown, 'NavigationOnly'), '');
+  assert.ok(markdown.includes('**Key properties:** `Id` (string)'));
+  assert.ok(markdown.includes('- `Resources` (collection) — Package resources'));
+  assert.equal(operationsLine(markdown, 'DisabledCrud'), '');
+  assert.ok(!markdown.includes('HiddenNavigation'));
+  assert.ok(!markdown.includes('Secrets'));
 });
 
 test('resource URI is a valid scheme for server names with uppercase letters or underscores', async () => {
