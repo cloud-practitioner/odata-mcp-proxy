@@ -24,7 +24,7 @@ interface Captured {
 function captureRegistration(
   definitions: EntitySetDefinition[],
   serverName: string,
-  ...categoryFilter: [enabledCategories?: string[]],
+  ...categoryFilter: [enabledCategories?: string[]]
 ): Captured {
   let captured: Captured | undefined;
   const server = {

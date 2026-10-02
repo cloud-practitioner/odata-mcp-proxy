@@ -71,7 +71,7 @@ API categories (can be filtered via `ENABLED_API_CATEGORIES` env var):
 | `src/index.ts` | Package root: exports `start(options?)` (with `registerExtras` session hook) and re-exports the building blocks; self-executes only when run directly |
 | `src/cli.ts` | CLI entry point (`--config` flag, then calls `start()`) |
 | `src/server/mcp-server.ts` | MCP server factory |
-| `src/server/http.ts` | Express HTTP server and session management |
+| `src/server/http.ts` | Express HTTP server |
 | `src/client/odata-client.ts` | OData HTTP client (GET/POST/PATCH/PUT/DELETE, binary downloads) |
 | `src/client/destination-service.ts` | Credential resolution (BTP vs local) |
 | `src/client/retry.ts` | Exponential backoff retry logic |

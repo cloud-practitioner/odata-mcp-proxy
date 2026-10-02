@@ -314,10 +314,9 @@ export async function start(options: StartOptions = {}): Promise<void> {
 
       // This is an initialize request.
       //
-      // The session ID is always generated server-side and never taken from the
-      // client: a client-chosen ID would let any caller who learns another
-      // session's ID re-initialize or tear it down (a DoS / session mix-up).
-      // A client-supplied `mcp-session-id` on initialize is therefore ignored.
+      // Ignore client-supplied IDs on initialize so a caller cannot replace
+      // another session by re-initializing with its ID. Each handshake gets
+      // a fresh server-generated ID; existing sessions are left untouched.
       const assignedSessionId = randomUUID();
 
       const server = createMcpSession();

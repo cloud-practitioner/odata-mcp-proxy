@@ -3,11 +3,9 @@
  *
  * A client that disconnects without sending `DELETE /mcp` would otherwise leak
  * its `McpServer` and transport in the session map forever (unbounded memory
- * growth). This store stamps each session's last activity and evicts (and
- * closes) any session idle for longer than the configured TTL.
- *
- * Every read/write through {@link get}/{@link set} refreshes the activity
- * timestamp so active sessions are never evicted.
+ * growth). Expiry is measured from the last {@link get}/{@link set} timestamp,
+ * not ongoing RPC execution or outbound SSE activity. Eviction removes the
+ * entry before teardown so subsequent lookups cannot reuse a closing session.
  */
 export class SessionStore<T> {
   private readonly entries = new Map<string, { session: T; lastActivity: number }>();
@@ -56,7 +54,7 @@ export class SessionStore<T> {
   }
 
   /**
-   * Evict and close every session idle for longer than the TTL.
+   * Evict and close every session whose last access is at least one TTL old.
    * Returns the ids that were evicted.
    */
   async evictIdle(): Promise<string[]> {

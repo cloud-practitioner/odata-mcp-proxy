@@ -49,10 +49,6 @@ function formatCategoryLabel(category: string): string {
     .join(' ');
 }
 
-/**
- * Return a comma-separated list of the operations that are available for an
- * entity set (e.g. "list, get, create") — enabled, key-gated, category-filtered.
- */
 function formatOperations(def: EntitySetDefinition): string {
   return availableOperations(def).join(', ');
 }
@@ -60,10 +56,8 @@ function formatOperations(def: EntitySetDefinition): string {
 // ─── Markdown Generation ─────────────────────────────────────────────────────
 
 /**
- * Build the full Markdown document that summarises every registered entity set.
- *
- * Entity sets are grouped by their `category` field and listed in the order
- * they appear in the definitions array.
+ * Keep enabled-category definitions even without CRUD operations: navigation-only
+ * definitions still need their key and navigation guidance (test/api-docs.test.ts).
  */
 function buildApiOverviewMarkdown(
   definitions: EntitySetDefinition[],
@@ -141,16 +135,13 @@ function buildApiOverviewMarkdown(
 /**
  * Register MCP resources that expose API documentation to LLM clients.
  *
- * Currently registers a single static resource:
- *
- * - **{serverName}-api-overview** (`odata-mcp-proxy://api/overview`) — a Markdown
- *   summary of all available entity sets, their operations, keys, and
- *   navigation properties.
+ * See README.md's "Available Tools" section for the overview resource URI
+ * and client-facing behavior.
  *
  * @param server            The MCP server instance to register resources on.
  * @param definitions       The full list of entity set definitions to document.
  * @param serverName        Server name used for the resource title and name.
- * @param enabledCategories Category filter; only enabled categories are listed.
+ * @param enabledCategories Category filter; defaults to ['all'] when omitted or undefined.
  */
 export function registerApiDocResources(
   server: McpServer,
