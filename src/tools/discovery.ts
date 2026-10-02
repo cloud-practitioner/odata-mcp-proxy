@@ -30,6 +30,7 @@ import {
   type KeyProperty,
 } from './registry.js';
 import { logger } from '../utils/logger.js';
+import { buildEntityPath } from './path-guard.js';
 
 /** Map-key separator; cannot occur in an api or entity-set name. */
 const KEY_SEP = '\u0000';
@@ -436,9 +437,18 @@ export function registerDiscoveryTools(server: McpServer, options: DiscoveryOpti
       }
 
       const urlPath = entry.definition.urlPath ?? entry.definition.entitySet;
-      const fullPath = args.navProperty
-        ? `${urlPath}${args.path ?? ''}/${args.navProperty}`
-        : `${urlPath}${args.path ?? ''}`;
+      let fullPath: string;
+      try {
+        fullPath = buildEntityPath({
+          urlPath,
+          pathPrefix: entry.client.pathPrefix,
+          path: args.path,
+          navProperty: args.navProperty,
+          navProperties: entry.navProperties,
+        });
+      } catch (error) {
+        return formatToolError(error instanceof Error ? error.message : String(error));
+      }
 
       try {
         const result = await entry.client.execute(

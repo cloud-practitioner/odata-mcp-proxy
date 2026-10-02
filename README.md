@@ -467,7 +467,7 @@ Two levels rather than the more common three-tool `discover → describe → exe
 
 An empty or unmatched query returns the whole catalog rather than nothing, with `matched: false` and a `note` saying so — a dead end is worse for the model than a list it can narrow. Search is keyword-based with field weighting (exact name ≫ name prefix ≫ category ≫ description), and splits camelCase so `sub accounts` finds `Subaccounts`. Embeddings were deliberately not used: it would pull a model dependency into a package that has none.
 
-**`execute_operation(api, entitySet, operation, path?, navProperty?, body?, headers?)`** — routes to the same `ODataClient`, method and path construction as the generated tools, including the `requiredScope` policy (the check is shared, not reimplemented; see [Operation Scopes](#operation-scopes)).
+**`execute_operation(api, entitySet, operation, path?, navProperty?, body?, headers?)`** — routes to the same `ODataClient`, method and path construction as the generated tools, including the `requiredScope` policy (the check is shared, not reimplemented; see [Operation Scopes](#operation-scopes)). The shared [tool request argument rules](#tool-request-arguments) also apply.
 
 Because a generic executor has no per-tool schema to reject bad input, it validates routing itself and every failure names the valid options:
 
@@ -671,6 +671,23 @@ IntegrationPackages_create
 IntegrationDesigntimeArtifacts_Configurations_list
 MessageProcessingLogs_ErrorInformations_list
 ```
+
+### Tool Request Arguments
+
+Generated entity tools and `execute_operation` accept a `path` **suffix**, not a full URL or an API-root path. It is appended to the configured `urlPath` (default: `entitySet`) under the API's `pathPrefix`. Omit it or use an empty string to address the collection, where the operation permits it.
+
+A nonempty suffix must start with one of:
+
+- `(` for an OData key expression, e.g. `('MyId')?$select=Id,Name`. Keyed paths can include further navigation or resource segments, such as `('MyId')/$value`.
+- `?` for query options, e.g. `?$filter=Name eq 'test'&$top=10`.
+- `/<declared-navigation-property>`, optionally with a key and further segments, e.g. `/Configurations('MyParam')/Values?$top=1`.
+- `/<REST-key>` for a **single nonempty segment** that is not a declared navigation property, e.g. `/subaccountGUID?$select=guid`. Further segments such as `/subaccountGUID/more` are rejected.
+
+Validation rejects `..`, `%2e` (case-insensitive), backslashes, and `#` **anywhere in the suffix**, including key values and query options. Control characters (U+0000–U+001F and U+007F–U+009F) and trailing spaces are also rejected. The normalized URL pathname must remain at the entity-set prefix or continue at a key (`(`) or slash (`/`) boundary; a lookalike prefix is not sufficient. Invalid paths return an `isError` tool result before any backend request. The shared validator is [src/tools/path-guard.ts](src/tools/path-guard.ts).
+
+Navigation tools append their navigation property **before** any query string; do not include that property again in `path`. For example, `IntegrationDesigntimeArtifacts_Configurations_list` with `path: "(Id='MyFlow',Version='active')?$top=5"` requests `IntegrationDesigntimeArtifacts(Id='MyFlow',Version='active')/Configurations?$top=5`. The discovery executor does the same when `navProperty: "Configurations"` is supplied.
+
+The optional `headers` argument is filtered case-insensitively through `ALLOWED_REQUEST_HEADERS` in [src/client/odata-client.ts](src/client/odata-client.ts), the authoritative allowlist. Use it for supported negotiation and concurrency headers, such as `Accept` and `If-Match`; all other model-supplied headers are silently dropped. Destination authentication and CSRF handling remain controlled by the SAP Cloud SDK, not the tool's headers. A supplied JSON body sets `Content-Type` to `application/json`.
 
 ### OData Query Parameters
 

@@ -18,6 +18,65 @@ export interface BinaryResponseBody {
 // instead of stripping it, so BOM-prefixed text round-trips byte-for-byte.
 const strictUtf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
+/**
+ * Headers the model is permitted to set on an outbound request. OData clients
+ * legitimately need these (content negotiation, optimistic concurrency, OData
+ * version hints); everything else is dropped. Keeping an allowlist rather than
+ * only a denylist means a newly dangerous header is stripped by default. (F4)
+ */
+const ALLOWED_REQUEST_HEADERS = new Set([
+  'accept',
+  'accept-language',
+  'content-language',
+  'content-type',
+  'if-match',
+  'if-none-match',
+  'prefer',
+  'slug',
+  'dataserviceversion',
+  'maxdataserviceversion',
+  'odata-version',
+  'odata-maxversion',
+  'odata-isolation',
+]);
+
+/**
+ * Headers that must never be taken from the model, even if an allowlist entry
+ * were ever to overlap. A caller could otherwise redirect the destination's
+ * bearer token to another host (Host / X-Forwarded-*), spoof auth
+ * (Authorization / Cookie / x-csrf-token), or tunnel through a proxy
+ * (Proxy-*). (F4)
+ */
+function isAlwaysStrippedHeader(name: string): boolean {
+  const n = name.toLowerCase();
+  return (
+    n === 'host' ||
+    n === 'authorization' ||
+    n === 'cookie' ||
+    n === 'x-csrf-token' ||
+    n.startsWith('x-forwarded-') ||
+    n.startsWith('proxy-')
+  );
+}
+
+/**
+ * Filter model-supplied headers down to the allowlist, always stripping the
+ * forbidden set. The destination bearer token is attached by the SAP Cloud SDK
+ * from the resolved destination, not from these headers, so it is unaffected.
+ */
+export function sanitizeRequestHeaders(
+  headers: Record<string, string> | undefined,
+): Record<string, string> {
+  const safe: Record<string, string> = {};
+  if (!headers) return safe;
+  for (const [name, value] of Object.entries(headers)) {
+    if (isAlwaysStrippedHeader(name)) continue;
+    if (!ALLOWED_REQUEST_HEADERS.has(name.toLowerCase())) continue;
+    safe[name] = value;
+  }
+  return safe;
+}
+
 function toBuffer(data: unknown): Buffer | undefined {
   if (Buffer.isBuffer(data)) return data;
   if (data instanceof ArrayBuffer) return Buffer.from(data);
@@ -74,7 +133,7 @@ export function decodeResponseBody(data: unknown, contentType: string): unknown 
 export class ODataClient {
   constructor(
     private readonly getDestination: (jwt?: string) => Promise<HttpDestinationOrFetchOptions>,
-    private readonly pathPrefix: string = '/api/v1',
+    public readonly pathPrefix: string = '/api/v1',
     private readonly timeout: number = 60000,
     private readonly csrfProtected: boolean = true,
   ) {}
@@ -128,7 +187,7 @@ export class ODataClient {
    * @param method - HTTP method (GET, POST, PATCH, PUT, DELETE)
    * @param path   - Relative path, may include query string
    * @param body   - Optional request body for POST/PATCH/PUT
-   * @param extraHeaders - Optional additional HTTP headers
+   * @param extraHeaders - Optional headers filtered by {@link sanitizeRequestHeaders}
    */
   async execute(
     method: string,
@@ -141,7 +200,11 @@ export class ODataClient {
 
     if (upperMethod === 'GET') {
       logger.debug('OData execute GET', { url: `${this.pathPrefix}/${path}` });
-      const response = await this.getRaw(path, { Accept: 'application/json', ...extraHeaders }, jwt);
+      const response = await this.getRaw(
+        path,
+        { Accept: 'application/json', ...sanitizeRequestHeaders(extraHeaders) },
+        jwt,
+      );
 
       if (response.status === 204) {
         return undefined;
@@ -210,7 +273,7 @@ export class ODataClient {
       const destination = await this.getDestination(jwt);
       const headers: Record<string, string> = {
         Accept: 'application/json',
-        ...extraHeaders,
+        ...sanitizeRequestHeaders(extraHeaders),
       };
 
       if (data) {

@@ -9,6 +9,7 @@ import {
   resolveOperation,
 } from '../config/index.js';
 import { logger } from '../utils/logger.js';
+import { buildEntityPath } from './path-guard.js';
 
 // ─── Tool Definition Types ───────────────────────────────────────────────────
 
@@ -235,15 +236,20 @@ function authorizeAnyOf(
 async function handleToolCall(
   client: ODataClient,
   method: string,
-  entitySet: string,
+  urlPath: string,
   navProperty: string | undefined,
+  navProperties: string[],
   args: { path?: string; body?: Record<string, unknown>; headers?: Record<string, string> },
   jwt?: string,
 ): Promise<CallToolResult> {
   try {
-    const fullPath = navProperty
-      ? `${entitySet}${args.path ?? ''}/${navProperty}`
-      : `${entitySet}${args.path ?? ''}`;
+    const fullPath = buildEntityPath({
+      urlPath,
+      pathPrefix: client.pathPrefix,
+      path: args.path,
+      navProperty,
+      navProperties,
+    });
 
     const result = await client.execute(method, fullPath, args.body, args.headers, jwt);
     return formatToolResult(result ?? { success: true });
@@ -267,6 +273,7 @@ export function registerEntityTools(
 ): void {
   const { entitySet, description, keys, operations, navigationProperties } = definition;
   const urlPath = definition.urlPath ?? entitySet;
+  const navNames = (navigationProperties ?? []).map((n) => n.name);
   const keyHint = formatKeyHint(keys);
 
   // Resolve all operations once — normalises boolean | object to { enabled, requiredScope }
@@ -284,7 +291,7 @@ export function registerEntityTools(
       async (args, extra) => {
         try { authorize(opList.requiredScope, extra.authInfo?.token, scopeOptions); }
         catch (e) { return formatToolError(e instanceof Error ? e.message : String(e)); }
-        return handleToolCall(client, 'GET', urlPath, undefined, args, extra.authInfo?.token);
+        return handleToolCall(client, 'GET', urlPath, undefined, navNames, args, extra.authInfo?.token);
       },
     );
   }
@@ -297,7 +304,7 @@ export function registerEntityTools(
       async (args, extra) => {
         try { authorize(opGet.requiredScope, extra.authInfo?.token, scopeOptions); }
         catch (e) { return formatToolError(e instanceof Error ? e.message : String(e)); }
-        return handleToolCall(client, 'GET', urlPath, undefined, args, extra.authInfo?.token);
+        return handleToolCall(client, 'GET', urlPath, undefined, navNames, args, extra.authInfo?.token);
       },
     );
   }
@@ -310,7 +317,7 @@ export function registerEntityTools(
       async (args, extra) => {
         try { authorize(opCreate.requiredScope, extra.authInfo?.token, scopeOptions); }
         catch (e) { return formatToolError(e instanceof Error ? e.message : String(e)); }
-        return handleToolCall(client, 'POST', urlPath, undefined, args, extra.authInfo?.token);
+        return handleToolCall(client, 'POST', urlPath, undefined, navNames, args, extra.authInfo?.token);
       },
     );
   }
@@ -330,7 +337,7 @@ export function registerEntityTools(
       async (args, extra) => {
         try { authorize(opUpdate.requiredScope, extra.authInfo?.token, scopeOptions); }
         catch (e) { return formatToolError(e instanceof Error ? e.message : String(e)); }
-        return handleToolCall(client, updateMethod, urlPath, undefined, args, extra.authInfo?.token);
+        return handleToolCall(client, updateMethod, urlPath, undefined, navNames, args, extra.authInfo?.token);
       },
     );
   }
@@ -343,7 +350,7 @@ export function registerEntityTools(
       async (args, extra) => {
         try { authorize(opDelete.requiredScope, extra.authInfo?.token, scopeOptions); }
         catch (e) { return formatToolError(e instanceof Error ? e.message : String(e)); }
-        return handleToolCall(client, 'DELETE', urlPath, undefined, args, extra.authInfo?.token);
+        return handleToolCall(client, 'DELETE', urlPath, undefined, navNames, args, extra.authInfo?.token);
       },
     );
   }
@@ -373,7 +380,7 @@ export function registerEntityTools(
         async (args, extra) => {
           try { authorizeAnyOf(navReadScopes, extra.authInfo?.token, scopeOptions); }
           catch (e) { return formatToolError(e instanceof Error ? e.message : String(e)); }
-          return handleToolCall(client, 'GET', urlPath, nav.name, args, extra.authInfo?.token);
+          return handleToolCall(client, 'GET', urlPath, nav.name, navNames, args, extra.authInfo?.token);
         },
       );
     }
