@@ -173,7 +173,7 @@ Create an `api-config.json` in your project root. The CLI automatically picks it
 }
 ```
 
-The config is validated at startup: an unknown or misspelled key, a value of the wrong type, or an unsupported `method` stops the server with a message naming the offending location (e.g. `apis[0].entitySets[3].operations.update.method`). Omitted fields fall back to defaults: `server.version` to this package's version, `apis[].name` to `api<index>` (e.g. `api0`) and `apis[].pathPrefix` to `/api/v1`.
+The config is validated at startup: an unknown or misspelled key, a value of the wrong type, or an unsupported `method` stops the server with a message naming the offending location (e.g. `apis[0].entitySets[3].operations.update.method`). Duplicate `apis[].name` values, and any config that would register the same MCP tool name or resource URI twice (for example two entity sets with the same name), are also rejected at startup rather than crashing on the first client connection. Omitted fields fall back to defaults: `server.version` to this package's version, `apis[].name` to `api<index>` (e.g. `api0`) and `apis[].pathPrefix` to `/api/v1`.
 
 Each entry in `entitySets` supports:
 
@@ -564,7 +564,7 @@ Use `ENABLED_API_CATEGORIES` to restrict which tool groups are registered:
 | `security-content` | Keystores, certificates, SSH keys, credentials, OAuth2 clients, secure parameters, access policies |
 | `partner-directory` | Partners, string/binary parameters, alternative partners, authorized users |
 
-Set to `all` (the default) to enable every category.
+Set to `all` (the default) to enable every category. A requested category that matches no entity set (e.g. a typo) fails fast at startup rather than silently registering nothing.
 
 ### Operation Scopes
 

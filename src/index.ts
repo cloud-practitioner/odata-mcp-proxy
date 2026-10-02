@@ -17,7 +17,7 @@ import { resolveDestination } from './client/destination-service.js';
 import { ODataClient } from './client/odata-client.js';
 import { createMcpServer } from './server/mcp-server.js';
 import { SessionStore } from './server/sessions.js';
-import { registerAllTools } from './tools/registry.js';
+import { registerAllTools, findUnknownCategories } from './tools/registry.js';
 import { registerApiDocResources } from './resources/index.js';
 import { XsuaaAuth } from './auth/xsuaa-auth.js';
 
@@ -118,6 +118,20 @@ export async function start(options: StartOptions = {}): Promise<void> {
   const clientsByApi = Object.fromEntries(
     odataClients.map(({ apiDef, client }) => [apiDef.name, client]),
   );
+
+  // Fail fast on an ENABLED_API_CATEGORIES typo: a requested category that
+  // matches no entity set otherwise registers nothing, and tools/list then
+  // returns an empty list (or discovery reports a misleading error) with no
+  // hint that the filter was the cause.
+  const unknownCategories = findUnknownCategories(config.enabledApiCategories, allEntitySets);
+  if (unknownCategories.length > 0) {
+    const available = [...new Set(allEntitySets.map((d) => d.category).filter(Boolean))];
+    throw new Error(
+      `ENABLED_API_CATEGORIES references categor${unknownCategories.length > 1 ? 'ies' : 'y'} ` +
+      `matching no entity set: ${unknownCategories.join(', ')}. ` +
+      `Available categories: ${available.join(', ') || '(none defined)'}.`,
+    );
+  }
 
   logger.info('OData clients ready', {
     apis: apiConfig.apis.map((a) => a.name),
@@ -261,6 +275,16 @@ export async function start(options: StartOptions = {}): Promise<void> {
     return server;
   }
 
+  // ── Startup self-check ──────────────────────────────────────────────────────
+  //
+  // Build one throwaway session now so any registration error (a duplicate
+  // tool name the config check missed, or a UI view referencing an unknown
+  // API) surfaces here at startup instead of inside the per-session factory on
+  // the first client connect (HTTP) or at launch (stdio). Closing it releases
+  // the probe; shared ODataClients are untouched.
+  const probeSession = createMcpSession();
+  await probeSession.close().catch(() => { /* not connected to a transport */ });
+
   // ── 4. Start the chosen transport ───────────────────────────────────────────
 
   if (config.mcpTransport === 'http') {
@@ -270,7 +294,7 @@ export async function start(options: StartOptions = {}): Promise<void> {
     const { StreamableHTTPServerTransport } = await import(
       '@modelcontextprotocol/sdk/server/streamableHttp.js'
     );
-    const { createHttpServer, startHttpServer } = await import(
+    const { createHttpServer, startHttpServer, asyncHandler } = await import(
       './server/http.js'
     );
 
@@ -289,8 +313,10 @@ export async function start(options: StartOptions = {}): Promise<void> {
     // Sweep at the TTL cadence, capped so eviction stays reasonably prompt.
     sessions.startSweeping(Math.min(SESSION_IDLE_TTL_MS, 60_000));
 
-    // Handler for POST /mcp — initialization and JSON-RPC requests
-    app.post('/mcp', async (req, res) => {
+    // Handler for POST /mcp — initialization and JSON-RPC requests. Each MCP
+    // handler is wrapped with asyncHandler so a throw returns 500 rather than
+    // becoming an unhandled rejection that crashes the process.
+    app.post('/mcp', asyncHandler(async (req, res) => {
       const sessionId = req.headers['mcp-session-id'] as string | undefined;
       const body = req.body as { method?: string } | Array<{ method?: string }> | undefined;
       const isInitRequest = Array.isArray(body)
@@ -352,10 +378,10 @@ export async function start(options: StartOptions = {}): Promise<void> {
 
       // Handle the initial request (which will be the initialization handshake).
       await transport.handleRequest(req, res, req.body);
-    });
+    }));
 
     // Handler for GET /mcp — SSE stream for server-to-client notifications
-    app.get('/mcp', async (req, res) => {
+    app.get('/mcp', asyncHandler(async (req, res) => {
       const sessionId = req.headers['mcp-session-id'] as string | undefined;
 
       if (sessionId === undefined) {
@@ -377,10 +403,10 @@ export async function start(options: StartOptions = {}): Promise<void> {
 
       const { transport } = sessions.get(sessionId)!;
       await transport.handleRequest(req, res);
-    });
+    }));
 
     // Handler for DELETE /mcp — session termination
-    app.delete('/mcp', async (req, res) => {
+    app.delete('/mcp', asyncHandler(async (req, res) => {
       const sessionId = req.headers['mcp-session-id'] as string | undefined;
 
       if (sessionId === undefined) {
@@ -402,7 +428,7 @@ export async function start(options: StartOptions = {}): Promise<void> {
 
       const { transport } = sessions.get(sessionId)!;
       await transport.handleRequest(req, res, req.body);
-    });
+    }));
 
     // Start listening
     await startHttpServer(app, config.port);

@@ -40,6 +40,34 @@ function getBaseUrl(req: Request): string {
   return `${proto}://${req.get('host')}`;
 }
 
+/** An async Express route handler (the MCP endpoints are all async). */
+export type AsyncRouteHandler = (req: Request, res: Response) => Promise<void>;
+
+/**
+ * Wrap an async Express handler so a rejected promise returns a 500 JSON-RPC
+ * error instead of becoming an unhandled rejection. Express 4 does not await
+ * route handlers, so an un-awaited throw otherwise crashes the process (and CF
+ * then crash-loops the app).
+ */
+export function asyncHandler(fn: AsyncRouteHandler): (req: Request, res: Response) => void {
+  return (req, res) => {
+    fn(req, res).catch((error: unknown) => {
+      logger.error('Unhandled error in MCP handler', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      if (!res.headersSent) {
+        res.status(500).json({
+          jsonrpc: '2.0',
+          error: { code: -32603, message: 'Internal server error' },
+          id: null,
+        });
+      } else {
+        res.end();
+      }
+    });
+  };
+}
+
 // In-memory store for MCP-Inspector OAuth proxy state (short-lived, <10 min).
 // Maps `state` → { mcpRedirectUri, code_challenge, … }
 const mcpProxyStates = new Map<

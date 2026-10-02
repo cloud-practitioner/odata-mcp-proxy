@@ -152,3 +152,99 @@ test('api-level and top-level misspellings are rejected', () => {
   assert.ok(message.includes("apis[0]: Unrecognized key(s) in object: 'csrfprotected'"), message);
   assert.ok(message.includes("(root): Unrecognized key(s) in object: 'dicovery'"), message);
 });
+
+// ─── Duplicate api names (F11) ───────────────────────────────────────────────
+
+test('a duplicate apis[].name is rejected by the schema', () => {
+  const config = {
+    server: { name: 's' },
+    apis: [
+      { name: 'cpi', destination: 'DEST_A', entitySets: [] },
+      { name: 'cpi', destination: 'DEST_B', entitySets: [] },
+    ],
+  };
+  assert.ok(errorFor(config).includes('apis[1].name: duplicate api name "cpi" (already used by apis[0])'), errorFor(config));
+});
+
+test('a default api name colliding with an explicit one is rejected', () => {
+  // The second api omits `name`, so it defaults to "api1"; the first names
+  // itself "api1" explicitly — the transform fills the default, then the
+  // refine catches the collision.
+  const config = {
+    server: { name: 's' },
+    apis: [
+      { name: 'api1', destination: 'DEST_A', entitySets: [] },
+      { destination: 'DEST_B', entitySets: [] },
+    ],
+  };
+  assert.ok(errorFor(config).includes('apis[1].name: duplicate api name "api1"'), errorFor(config));
+});
+
+test('distinct api names are accepted', () => {
+  assert.doesNotThrow(() => parseApiConfig({
+    server: { name: 's' },
+    apis: [
+      { name: 'cpi', destination: 'DEST_A', entitySets: [] },
+      { name: 'btp', destination: 'DEST_B', entitySets: [] },
+    ],
+  }, 'cfg.json'));
+});
+
+// ─── Duplicate generated tool names / resource URIs (F10) ────────────────────
+
+/** A config with two entity sets, each with the given name, both list-enabled. */
+function withEntitySets(names: string[]): unknown {
+  return {
+    server: { name: 's' },
+    apis: [{
+      name: 'a',
+      destination: 'DEST',
+      entitySets: names.map((entitySet) => ({
+        entitySet,
+        keys: [{ name: 'Id', type: 'string' }],
+        operations: { list: true },
+      })),
+    }],
+  };
+}
+
+test('two entity sets with the same name are rejected (duplicate tool name)', () => {
+  const message = errorFor(withEntitySets(['Orders', 'Orders']));
+  assert.ok(message.includes('duplicate tool name "Orders_list"'), message);
+});
+
+test('two entity sets with the same name in different apis are rejected', () => {
+  const config = {
+    server: { name: 's' },
+    apis: [
+      { name: 'a', destination: 'DEST_A', entitySets: [{ entitySet: 'Orders', keys: [{ name: 'Id', type: 'string' }], operations: { list: true } }] },
+      { name: 'b', destination: 'DEST_B', entitySets: [{ entitySet: 'Orders', keys: [{ name: 'Id', type: 'string' }], operations: { list: true } }] },
+    ],
+  };
+  assert.ok(errorFor(config).includes('duplicate tool name "Orders_list"'), errorFor(config));
+});
+
+test('distinct entity set names are accepted', () => {
+  assert.doesNotThrow(() => parseApiConfig(withEntitySets(['Orders', 'Invoices']), 'cfg.json'));
+});
+
+test('two UI views with the same uri are rejected (duplicate resource URI)', () => {
+  const config = {
+    server: { name: 's' },
+    apis: [{ name: 'a', destination: 'DEST', entitySets: [] }],
+    ui: [
+      { tool: 'UI_One', uri: 'ui://dash', template: 'a.html' },
+      { tool: 'UI_Two', uri: 'ui://dash', template: 'b.html' },
+    ],
+  };
+  assert.ok(errorFor(config).includes('duplicate resource URI "ui://dash"'), errorFor(config));
+});
+
+test('a UI view tool colliding with a generated entity tool is rejected', () => {
+  const config = {
+    server: { name: 's' },
+    apis: [{ name: 'a', destination: 'DEST', entitySets: [{ entitySet: 'Orders', keys: [{ name: 'Id', type: 'string' }], operations: { list: true } }] }],
+    ui: [{ tool: 'Orders_list', uri: 'ui://dash', template: 'a.html' }],
+  };
+  assert.ok(errorFor(config).includes('duplicate tool name "Orders_list"'), errorFor(config));
+});
