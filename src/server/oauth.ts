@@ -208,6 +208,10 @@ export function setupXsuaaAuth(app: Express, credentials: XsuaaCredentials, appU
     resourceServerUrl: new URL(`${appUrl}/mcp`),
     scopesSupported: [],
     resourceName: 'OData MCP Proxy',
+    authorizationOptions: { rateLimit: false },
+    tokenOptions: { rateLimit: false },
+    clientRegistrationOptions: { rateLimit: false },
+    revocationOptions: { rateLimit: false },
   }));
   return requireBearerAuth({
     verifier: { verifyAccessToken: createXsuaaTokenVerifier(credentials, { acceptedScopes: [], logger }) },

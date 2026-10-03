@@ -547,6 +547,57 @@ test('F17: the advertised token endpoint rejects GET and redacts refresh tokens 
   assert.ok(fresh.includes('/oauth/callback?<redacted>'));
 });
 
+test('R13: repeated registration and token requests from one IP are not rate limited', async () => {
+  for (let i = 0; i < 21; i++) {
+    const method = i % 2 === 0 ? 'none' : 'client_secret_post';
+    const client = await registerClient(method);
+    assert.equal(client.status, 201, `registration ${i + 1} must succeed`);
+    assert.equal(client.token_endpoint_auth_method, method);
+  }
+  for (const method of ['none', 'client_secret_post']) {
+    const client = await registerClient(method);
+    assert.equal(client.status, 201);
+    const auth = { client_id: client.client_id, ...(client.client_secret ? { client_secret: client.client_secret } : {}) };
+    const grant = await issueCode(client.client_id);
+    const response = await token({ grant_type: 'authorization_code', code: grant.code, code_verifier: VERIFIER, ...auth });
+    assert.equal(response.status, 200);
+    let refresh = (await response.json()).refresh_token as string;
+    for (let i = 0; i < 51; i++) {
+      const refreshed = await token({ grant_type: 'refresh_token', refresh_token: refresh, ...auth });
+      assert.equal(refreshed.status, 200, `${method} refresh ${i + 1} must succeed`);
+      refresh = (await refreshed.json()).refresh_token;
+      assert.ok(refresh);
+    }
+  }
+});
+
+test('R13: repeated authorization and revocation requests from one IP are not rate limited', async () => {
+  const client = await registerClient();
+  assert.equal(client.status, 201);
+  for (let i = 0; i < 101; i++) {
+    const response = await authorize(client.client_id, i % 2 === 0 ? 'GET' : 'POST');
+    assert.equal(response.status, 302, `authorization ${i + 1} must succeed`);
+    assert.equal(new URL(response.headers.get('location')!).origin, xsuaaUrl);
+  }
+  const grant = await issueCode(client.client_id);
+  const response = await token({ grant_type: 'authorization_code', code: grant.code, code_verifier: VERIFIER, client_id: client.client_id });
+  assert.equal(response.status, 200);
+  const issued = await response.json() as { refresh_token: string };
+  const rawRefresh = [...refreshTokens.keys()].at(-1)!;
+  const count = revokedTokens.length;
+  for (let i = 0; i < 51; i++) {
+    const revoked = await fetch(discovery.revocation_endpoint, {
+      method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ token: issued.refresh_token, token_type_hint: 'refresh_token', client_id: client.client_id }),
+    });
+    assert.equal(revoked.status, 200, `revocation ${i + 1} must succeed`);
+    await revoked.json();
+  }
+  assert.equal(revokedTokens.length, count + 51);
+  assert.ok(revokedTokens.slice(count).every((token) => token === rawRefresh));
+  assert.equal(refreshTokens.has(rawRefresh), false);
+});
+
 test('F17/R4: discovery uses the pinned public origin despite Host and ambient CF metadata', async () => {
   const response = await fetch(`${url}/.well-known/oauth-authorization-server`, { headers: { host: 'evil.example' } });
   const meta = await response.json() as Record<string, string>;
