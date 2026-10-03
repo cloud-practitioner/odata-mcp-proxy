@@ -521,7 +521,7 @@ await start({
 
 `ODataClient`, `resolveDestination`, `createMcpServer`, `registerAllTools`, `registerApiDocResources`, and the config types are re-exported from the package root as well.
 
-**Migration note:** if you previously forked the bootstrap (copying the transport/session wiring and deep-importing from `odata-mcp-proxy/dist/...` to add your own tools), you can delete that entry point: call `start({ registerExtras })` for custom tools, and move interactive views into the config's `ui` section. Deep `dist/` imports keep working via the package's `exports` map, but the root export is the supported surface.
+**Migration note:** if you previously forked the bootstrap (copying the transport/session wiring and deep-importing from `odata-mcp-proxy/dist/...` to add your own tools), you can delete that entry point: call `start({ registerExtras })` for custom tools, and move interactive views into the config's `ui` section. Remaining deep `dist/` imports are supported via the package's `exports` map, but the root export is the supported surface. The former `dist/auth/xsuaa-auth.js` module has been removed; inbound authentication now uses `@arc-mcp/xsuaa-auth`.
 
 ---
 
@@ -550,6 +550,7 @@ The server validates core environment settings and the selected API config at st
 | `REQUEST_TIMEOUT` | No | `60000` | HTTP request timeout in milliseconds |
 | `ENABLED_API_CATEGORIES` | No | `all` | Comma-separated list of API categories to enable (see below) |
 | `API_CONFIG_FILE` | No | `api-config.json` | Config file name or absolute path. A relative name is resolved against the current working directory, then the entry-script directory, then the package's bundled `dist/config/`. |
+| `PUBLIC_BASE_URL` | No | CF route, then `http://localhost:<PORT>` | Public origin for OAuth discovery, protected-resource metadata, and the server callback (HTTP with XSUAA bound). Use HTTPS outside localhost; no base path, query, fragment, or credentials. Set it for a reverse proxy with a different host. Without an override, the first route in `VCAP_APPLICATION` is used; the request `Host` header is never used. |
 | `CORS_ORIGIN` | No | -- | HTTP CORS allow-origin value, used only when `NODE_ENV=production`; unset in production omits CORS allow-origin headers. Non-production reflects the request origin. CORS is a browser policy, not authentication. |
 | `NODE_ENV` | No | -- | `production` selects structured JSON logging and restricts HTTP CORS to `CORS_ORIGIN`; other values select pretty development logs and reflect any origin. |
 
@@ -720,13 +721,15 @@ The `data` value can be passed unchanged as base64 content (e.g. `ArtifactConten
 
 ### HTTP (Streamable HTTP)
 
-Used for BTP Cloud Foundry deployment. The server exposes an `/mcp` endpoint supporting the MCP Streamable HTTP transport with session management, plus a `/health` endpoint for CF health checks.
+Used for BTP Cloud Foundry deployment. The server exposes an `/mcp` endpoint supporting the MCP Streamable HTTP transport with session management, plus an unauthenticated `/health` endpoint for CF health checks.
+
+With a complete XSUAA service binding, `/mcp` requires a valid bearer token. An incomplete or malformed binding stops HTTP startup rather than disabling authentication. Without an XSUAA binding, HTTP is **unauthenticated** and must not be exposed publicly. For MCP-native OAuth discovery and client setup, see [Connecting MCP Clients](docs/DEPLOYMENT.md#7-connecting-mcp-clients); tool-level authorization is described in [Operation Scopes](#operation-scopes).
 
 Each `initialize` returns a fresh server-generated UUID in the `mcp-session-id` response header. Any ID supplied on initialization is ignored without replacing an existing session; clients must use the returned ID on subsequent requests. Sessions are stored in memory with a fixed 30-minute idle TTL, measured from initialization or the last request routed to the session, and checked once per minute. Expired sessions are removed and closed.
 
 Non-initialize requests with an unknown session ID return HTTP 404; initialize again to obtain a new ID. `GET /mcp` and `DELETE /mcp` without a `mcp-session-id` header return HTTP 400 instead.
 
-JSON request bodies on `/mcp` have a fixed **50 MiB** (`50mb`) limit, including base64 content and the JSON-RPC envelope, not just the raw artifact bytes. When XSUAA is bound, authentication runs before body parsing (see [Operation Scopes](#operation-scopes)). An oversized MCP JSON body returns HTTP `413` with a JSON-RPC error (`code: -32600`, `id: null`) explaining the limit, rather than an HTML error page. Allowed CORS origins can read this error response.
+JSON request bodies on `/mcp` have a fixed **50 MiB** (`50mb`) limit, including base64 content and the JSON-RPC envelope, not just the raw artifact bytes. Routing is case-insensitive and accepts a trailing slash (e.g. `/MCP` and `/McP/` share this limit). When XSUAA is bound, authentication runs before body parsing, including on these alternate spellings and unmatched `/mcp/*` subpaths. An oversized MCP JSON body returns HTTP `413` with a JSON-RPC error (`code: -32600`, `id: null`) explaining the limit, rather than an HTML error page. Allowed CORS origins can read this error response.
 
 Public and unmatched routes retain Express's default 100 KiB JSON body limit. Malformed JSON and URL-encoded parser errors retain Express's normal error responses; they are not converted to JSON-RPC errors.
 
@@ -753,7 +756,7 @@ MCP_TRANSPORT=stdio npm start
 - **MCP SDK:** `@modelcontextprotocol/sdk` (resolved version in [package-lock.json](package-lock.json))
 - **SAP Cloud SDK:** `@sap-cloud-sdk/connectivity` and `@sap-cloud-sdk/http-client` 4.x for destination resolution and HTTP calls
 - **Validation:** Zod for configuration and input validation
-- **HTTP Framework:** Express 4.x (HTTP transport only)
+- **HTTP Framework:** Express (HTTP transport only; version requirements in [package.json](package.json))
 - **Logging:** Winston
 
 ---

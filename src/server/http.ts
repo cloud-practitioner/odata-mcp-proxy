@@ -52,11 +52,12 @@ const { version: packageVersion } = createRequire(import.meta.url)('../../packag
 export const PUBLIC_URL_ENV_VAR = 'PUBLIC_BASE_URL';
 
 /**
- * Redact the query string from a request URL before it is logged. OAuth
- * endpoints receive auth codes and refresh tokens in the query string
- * (`?code=…`, `?refresh_token=…`); logging `req.originalUrl` verbatim would
- * leak them into the (BTP-visible) application log (F17). The path is kept for
- * diagnostics; the query is collapsed to a fixed marker.
+ * Redact the query string from a request URL before it is logged. Callback
+ * URLs carry authorization codes, and arbitrary request queries may contain
+ * other credentials even when the endpoint rejects them. Logging
+ * `req.originalUrl` verbatim would leak them into the (BTP-visible) application
+ * log (F17). Keep the path for diagnostics and collapse every query to a fixed
+ * marker rather than relying on a list of known sensitive parameter names.
  */
 export function redactUrlForLog(originalUrl: string): string {
   const q = originalUrl.indexOf('?');
@@ -68,10 +69,9 @@ export function redactUrlForLog(originalUrl: string): string {
 export type AsyncRouteHandler = (req: Request, res: Response) => Promise<void>;
 
 /**
- * Wrap an async Express handler so a rejected promise returns a 500 JSON-RPC
- * error instead of becoming an unhandled rejection. Express does not await route
- * handlers, so an un-awaited throw otherwise crashes the process (and CF then
- * crash-loops the app).
+ * Keep rejected MCP handler promises in the JSON-RPC error contract instead
+ * of forwarding them to Express 5's default error handler. If a response has
+ * already started, end it rather than attempting a second error response.
  */
 export function asyncHandler(fn: AsyncRouteHandler): (req: Request, res: Response) => void {
   return (req, res) => {
