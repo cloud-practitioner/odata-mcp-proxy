@@ -9,8 +9,7 @@ import { dirname, join } from 'node:path';
 import { existsSync } from 'node:fs';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { XsuaaAuth } from '../src/auth/xsuaa-auth.js';
-import { createHttpServer } from '../src/server/http.js';
+import { createHttpServer, isXsuaaConfigured } from '../src/server/http.js';
 
 const rootDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 const configPath = join(rootDir, 'test', 'fixtures', 'e2e-binary-config.json');
@@ -161,21 +160,27 @@ test('an over-limit body returns a JSON MCP error, not an HTML 413', async () =>
 
 test('XSUAA rejects unfinished large MCP bodies before parsing', async () => {
   const previousServices = process.env.VCAP_SERVICES;
-  let auth: XsuaaAuth;
+  // A complete XSUAA binding so the bearer guard mounts on /mcp. The URL is
+  // never contacted here: a tokenless request is rejected by the guard before
+  // any upstream call or body parsing.
+  process.env.VCAP_SERVICES = JSON.stringify({
+    xsuaa: [{
+      label: 'xsuaa',
+      credentials: {
+        clientid: 'id',
+        clientsecret: 'secret',
+        url: 'https://xsuaa.example',
+        uaadomain: 'xsuaa.example',
+        xsappname: 'e2e-body-limit',
+      },
+    }],
+  });
+  let server: Server | undefined;
   try {
-    process.env.VCAP_SERVICES = JSON.stringify({
-      xsuaa: [{ label: 'xsuaa', credentials: { clientid: 'id', clientsecret: 'secret', url: 'https://xsuaa.example' } }],
-    });
-    auth = new XsuaaAuth();
-  } finally {
-    if (previousServices === undefined) delete process.env.VCAP_SERVICES;
-    else process.env.VCAP_SERVICES = previousServices;
-  }
-  assert.equal(auth.isConfigured(), true);
-  const server = createServer(createHttpServer(0, auth));
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const port = (server.address() as AddressInfo).port;
-  try {
+    assert.equal(isXsuaaConfigured(), true);
+    server = createServer(createHttpServer(0));
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const port = (server.address() as AddressInfo).port;
     for (const method of ['POST', 'GET', 'DELETE']) {
       for (const path of ['/mcp', '/mcp/']) {
         const status = await new Promise<number | undefined>((resolve, reject) => {
@@ -200,8 +205,12 @@ test('XSUAA rejects unfinished large MCP bodies before parsing', async () => {
       }
     }
   } finally {
-    server.closeAllConnections();
-    await new Promise<void>((resolve) => server.close(() => resolve()));
+    if (previousServices === undefined) delete process.env.VCAP_SERVICES;
+    else process.env.VCAP_SERVICES = previousServices;
+    if (server) {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   }
 });
 

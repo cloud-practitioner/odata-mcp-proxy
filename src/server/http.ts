@@ -32,8 +32,14 @@ import {
 } from '@arc-mcp/xsuaa-auth';
 import cors from 'cors';
 import express, { type Express, type NextFunction, type Request, type Response } from 'express';
+import { createRequire } from 'node:module';
 import { logger } from '../utils/logger.js';
 import { setupXsuaaAuth } from './oauth.js';
+
+// Package version, read from package.json so /health stays in sync with releases.
+const { version: packageVersion } = createRequire(import.meta.url)('../../package.json') as {
+  version: string;
+};
 
 /**
  * Environment variable naming the public base URL this server advertises in its
@@ -56,6 +62,34 @@ export function redactUrlForLog(originalUrl: string): string {
   const q = originalUrl.indexOf('?');
   if (q === -1) return originalUrl;
   return `${originalUrl.slice(0, q)}?<redacted>`;
+}
+
+/** An async Express route handler (the MCP endpoints are all async). */
+export type AsyncRouteHandler = (req: Request, res: Response) => Promise<void>;
+
+/**
+ * Wrap an async Express handler so a rejected promise returns a 500 JSON-RPC
+ * error instead of becoming an unhandled rejection. Express does not await route
+ * handlers, so an un-awaited throw otherwise crashes the process (and CF then
+ * crash-loops the app).
+ */
+export function asyncHandler(fn: AsyncRouteHandler): (req: Request, res: Response) => void {
+  return (req, res) => {
+    fn(req, res).catch((error: unknown) => {
+      logger.error('Unhandled error in MCP handler', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      if (!res.headersSent) {
+        res.status(500).json({
+          jsonrpc: '2.0',
+          error: { code: -32603, message: 'Internal server error' },
+          id: null,
+        });
+      } else {
+        res.end();
+      }
+    });
+  };
 }
 
 // Adapt the winston logger to the `@arc-mcp/xsuaa-auth` structural Logger.
@@ -107,9 +141,17 @@ export function createHttpServer(port: number): Express {
   const app = express();
 
   // ── Body parsing ────────────────────────────────────────────────────────────
-  app.use(express.json());
-  // OAuth token / registration endpoints receive application/x-www-form-urlencoded bodies.
-  app.use(express.urlencoded({ extended: false }));
+  // Parse non-/mcp bodies (OAuth token/registration, discovery, health) at the
+  // default limit. All /mcp* paths are parsed later, AFTER the bearer guard, so
+  // an unauthenticated caller cannot force body buffering when XSUAA is bound.
+  const isMcpPath = (req: Request): boolean =>
+    req.path === '/mcp' || req.path.startsWith('/mcp/');
+  app.use((req: Request, res: Response, next: NextFunction) =>
+    isMcpPath(req) ? next() : express.json()(req, res, next),
+  );
+  app.use((req: Request, res: Response, next: NextFunction) =>
+    isMcpPath(req) ? next() : express.urlencoded({ extended: false })(req, res, next),
+  );
 
   // ── CORS ──────────────────────────────────────────────────────────────────────
   const isProduction = process.env.NODE_ENV === 'production';
@@ -155,7 +197,7 @@ export function createHttpServer(port: number): Express {
     res.json({
       status: 'ok',
       timestamp: new Date().toISOString(),
-      version: '1.0.0',
+      version: packageVersion,
       oauth: credentials !== undefined,
     });
   });
@@ -181,6 +223,31 @@ export function createHttpServer(port: number): Express {
       'XSUAA not configured — /mcp is UNAUTHENTICATED (local / stdio dev). Do not expose publicly.',
     );
   }
+
+  // ── /mcp body parsing ───────────────────────────────────────────────────────
+  // Mounted after the bearer guard so unauthenticated callers cannot force
+  // body buffering when XSUAA is bound (the guard 401s /mcp* first). The exact
+  // /mcp route accepts up to 50mb (artifact uploads are base64 payloads) and
+  // returns a 413 JSON-RPC error when exceeded; unmatched /mcp/* subpaths and
+  // urlencoded bodies keep Express's default limits and responses.
+  app.all(
+    '/mcp',
+    express.json({ limit: '50mb' }),
+    (err: Error & { type?: string }, req: Request, res: Response, next: NextFunction) => {
+      if (res.headersSent || err.type !== 'entity.too.large') {
+        next(err);
+        return;
+      }
+      logger.warn('Request body exceeds limit', { limit: '50mb', url: redactUrlForLog(req.originalUrl) });
+      res.status(413).json({
+        jsonrpc: '2.0',
+        error: { code: -32600, message: 'Request body too large: exceeds the limit of 50mb.' },
+        id: null,
+      });
+    },
+  );
+  app.use('/mcp', express.json());
+  app.use('/mcp', express.urlencoded({ extended: false }));
 
   // The MCP protocol endpoints (POST/GET/DELETE /mcp) are registered by the entry
   // point after transport initialisation; they run behind the guard mounted above.

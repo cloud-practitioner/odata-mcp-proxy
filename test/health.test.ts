@@ -6,14 +6,13 @@ import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createRequire } from 'node:module';
 import { createHttpServer } from '../src/server/http.js';
-import { XsuaaAuth } from '../src/auth/xsuaa-auth.js';
 
 const { version: packageVersion } = createRequire(import.meta.url)('../package.json') as {
   version: string;
 };
 
 test('/health reports the package.json version', async () => {
-  const app = createHttpServer(0, new XsuaaAuth());
+  const app = createHttpServer(0);
   const server = createServer(app);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
 
