@@ -119,7 +119,11 @@ export function setupXsuaaAuth(app: Express, credentials: XsuaaCredentials, appU
         if (!client.redirect_uris.every((uri) => matchesRedirectPattern(uri, patterns))) {
           throw new InvalidClientMetadataError('Redirect URI is not allowed');
         }
-        return clientStore.registerClient(client);
+        const method = client.token_endpoint_auth_method ?? 'client_secret_post';
+        if (method !== 'none' && method !== 'client_secret_post') {
+          throw new InvalidClientMetadataError('token_endpoint_auth_method must be none or client_secret_post');
+        }
+        return clientStore.registerClient({ ...client, token_endpoint_auth_method: method });
       },
     },
     skipLocalPkceValidation: true,

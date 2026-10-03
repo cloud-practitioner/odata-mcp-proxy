@@ -170,7 +170,7 @@ async function registerClient(method = 'none', redirectUri = REDIRECT_URI) {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ redirect_uris: [redirectUri], token_endpoint_auth_method: method, client_name: randomUUID() }),
   });
-  const body = await response.json() as { client_id: string; client_secret?: string };
+  const body = await response.json() as { client_id: string; client_secret?: string; token_endpoint_auth_method: string; error?: string; error_description?: string };
   return { ...body, status: response.status };
 }
 
@@ -269,11 +269,61 @@ test('F1: unauthenticated DCR does not expose the XSUAA secret for public or con
   for (const method of ['none', 'client_secret_post']) {
     const client = await registerClient(method);
     assert.equal(client.status, 201);
+    assert.equal(client.token_endpoint_auth_method, method);
     assert.ok(client.client_id.startsWith('mcp-'));
     assert.notEqual(client.client_id, CLIENT_ID);
     assert.notEqual(client.client_secret, FAKE_SECRET);
     if (method === 'none') assert.equal(client.client_secret, undefined);
     else assert.ok(client.client_secret);
+  }
+});
+
+test('R11: omitted authentication method advertises and honors client_secret_post for both grants and revocation', async () => {
+  const registration = await fetch(discovery.registration_endpoint, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ redirect_uris: [REDIRECT_URI], client_name: randomUUID() }),
+  });
+  assert.equal(registration.status, 201);
+  const client = await registration.json() as { client_id: string; client_secret: string; token_endpoint_auth_method: string };
+  assert.equal(client.token_endpoint_auth_method, 'client_secret_post');
+  assert.ok(client.client_secret);
+  assert.notEqual(client.client_secret, FAKE_SECRET);
+  const grant = await issueCode(client.client_id);
+  const codeParams = { grant_type: 'authorization_code', code: grant.code, code_verifier: VERIFIER, client_id: client.client_id };
+  const count = tokenRequests.length;
+  const unauthenticated = await token(codeParams);
+  assert.equal(unauthenticated.status, 400);
+  assert.equal((await unauthenticated.json()).error, 'invalid_client');
+  assert.equal(tokenRequests.length, count);
+  const auth = { client_id: client.client_id, client_secret: client.client_secret };
+  const response = await token({ ...codeParams, ...auth });
+  assert.equal(response.status, 200);
+  const issued = await response.json() as { refresh_token: string };
+  const refreshParams = { grant_type: 'refresh_token', refresh_token: issued.refresh_token, ...auth };
+  const refreshed = await token(refreshParams);
+  assert.equal(refreshed.status, 200);
+  const rotated = await refreshed.json() as { refresh_token: string };
+  const rawRefresh = [...refreshTokens.keys()].at(-1)!;
+  const revoked = await fetch(discovery.revocation_endpoint, {
+    method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ token: rotated.refresh_token, token_type_hint: 'refresh_token', ...auth }),
+  });
+  assert.equal(revoked.status, 200);
+  assert.equal(revokedTokens.at(-1), rawRefresh);
+  assert.equal(refreshTokens.has(rawRefresh), false);
+  const rejected = await token({ ...refreshParams, refresh_token: rotated.refresh_token });
+  assert.equal(rejected.status, 400);
+  assert.equal((await rejected.json()).error, 'invalid_grant');
+});
+
+test('R11: unsupported authentication methods are rejected at registration', async () => {
+  for (const method of ['client_secret_basic', 'private_key_jwt']) {
+    const client = await registerClient(method);
+    assert.equal(client.status, 400);
+    assert.equal(client.error, 'invalid_client_metadata');
+    assert.match(client.error_description ?? '', /token_endpoint_auth_method.*none.*client_secret_post/);
+    assert.equal(client.client_id, undefined);
+    assert.equal(client.client_secret, undefined);
   }
 });
 

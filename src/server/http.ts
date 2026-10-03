@@ -144,8 +144,10 @@ export function createHttpServer(port: number): Express {
   // Parse non-/mcp bodies (OAuth token/registration, discovery, health) at the
   // default limit. All /mcp* paths are parsed later, AFTER the bearer guard, so
   // an unauthenticated caller cannot force body buffering when XSUAA is bound.
-  const isMcpPath = (req: Request): boolean =>
-    req.path === '/mcp' || req.path.startsWith('/mcp/');
+  const isMcpPath = (req: Request): boolean => {
+    const path = req.path.toLowerCase();
+    return path === '/mcp' || path.startsWith('/mcp/');
+  };
   app.use((req: Request, res: Response, next: NextFunction) =>
     isMcpPath(req) ? next() : express.json()(req, res, next),
   );
