@@ -9,8 +9,7 @@ import { dirname, join } from 'node:path';
 import { existsSync } from 'node:fs';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { XsuaaAuth } from '../src/auth/xsuaa-auth.js';
-import { createHttpServer } from '../src/server/http.js';
+import { createHttpServer, isXsuaaConfigured } from '../src/server/http.js';
 
 const rootDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 const configPath = join(rootDir, 'test', 'fixtures', 'e2e-binary-config.json');
@@ -110,20 +109,22 @@ test('a large base64 artifact body (over the old 100 kb default) is accepted and
   const artifactContent = artifactBytes.toString('base64');
   assert.ok(artifactContent.length > 100 * 1024, 'test body must exceed the old 100 kb default');
 
-  const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${serverPort}/mcp`));
-  const client = new Client({ name: 'e2e-http-body-test', version: '0.0.0' });
-  await client.connect(transport);
-  try {
-    uploads.length = 0;
-    const result = (await client.callTool({
-      name: 'IntegrationDesigntimeArtifacts_create',
-      arguments: { body: { Id: 'Flow_A_copy', Name: 'copy', PackageId: 'Pkg', ArtifactContent: artifactContent } },
-    })) as { isError?: boolean; content: Array<{ type: string; text?: string }> };
-    assert.ok(!result.isError, `create failed: ${JSON.stringify(result.content)}`);
-    assert.equal(uploads.length, 1, 'backend must have received the upload');
-    assert.ok(uploads[0].equals(artifactBytes), 'uploaded bytes must round-trip');
-  } finally {
-    await client.close();
+  for (const path of ['/mcp', '/MCP', '/McP/']) {
+    const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${serverPort}${path}`));
+    const client = new Client({ name: 'e2e-http-body-test', version: '0.0.0' });
+    await client.connect(transport);
+    try {
+      uploads.length = 0;
+      const result = (await client.callTool({
+        name: 'IntegrationDesigntimeArtifacts_create',
+        arguments: { body: { Id: 'Flow_A_copy', Name: 'copy', PackageId: 'Pkg', ArtifactContent: artifactContent } },
+      })) as { isError?: boolean; content: Array<{ type: string; text?: string }> };
+      assert.ok(!result.isError, `create failed: ${JSON.stringify(result.content)}`);
+      assert.equal(uploads.length, 1, 'backend must have received the upload');
+      assert.ok(uploads[0].equals(artifactBytes), 'uploaded bytes must round-trip');
+    } finally {
+      await client.close();
+    }
   }
 });
 
@@ -136,78 +137,92 @@ test('an over-limit body returns a JSON MCP error, not an HTML 413', async () =>
     params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'x', version: '0', pad: huge } },
   });
 
-  const res = await fetch(`http://127.0.0.1:${serverPort}/mcp`, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      accept: 'application/json, text/event-stream',
-      origin: 'https://mcp-client.example',
-    },
-    body: payload,
-  });
+  for (const path of ['/mcp', '/MCP', '/McP/']) {
+    const res = await fetch(`http://127.0.0.1:${serverPort}${path}`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        accept: 'application/json, text/event-stream',
+        origin: 'https://mcp-client.example',
+      },
+      body: payload,
+    });
 
-  assert.equal(res.status, 413, 'over-limit body must yield 413');
-  assert.equal(res.headers.get('access-control-allow-origin'), 'https://mcp-client.example');
-  const contentType = res.headers.get('content-type') ?? '';
-  assert.match(contentType, /application\/json/, `expected JSON content type, got: ${contentType}`);
+    assert.equal(res.status, 413, 'over-limit body must yield 413');
+    assert.equal(res.headers.get('access-control-allow-origin'), 'https://mcp-client.example');
+    const contentType = res.headers.get('content-type') ?? '';
+    assert.match(contentType, /application\/json/, `expected JSON content type, got: ${contentType}`);
 
-  const text = await res.text();
-  assert.ok(!/<html/i.test(text), `body must not be an HTML error page: ${text.slice(0, 200)}`);
-  const json = JSON.parse(text) as { jsonrpc?: string; error?: { code?: number; message?: string } };
-  assert.equal(json.jsonrpc, '2.0', 'error must be a JSON-RPC envelope');
-  assert.ok(typeof json.error?.code === 'number', 'error must carry a numeric code');
-  assert.match(json.error?.message ?? '', /too large/i, 'message should explain the size limit');
+    const text = await res.text();
+    assert.ok(!/<html/i.test(text), `body must not be an HTML error page: ${text.slice(0, 200)}`);
+    const json = JSON.parse(text) as { jsonrpc?: string; error?: { code?: number; message?: string } };
+    assert.equal(json.jsonrpc, '2.0', 'error must be a JSON-RPC envelope');
+    assert.ok(typeof json.error?.code === 'number', 'error must carry a numeric code');
+    assert.match(json.error?.message ?? '', /too large/i, 'message should explain the size limit');
+  }
 });
 
 test('XSUAA rejects unfinished large MCP bodies before parsing', async () => {
   const previousServices = process.env.VCAP_SERVICES;
-  let auth: XsuaaAuth;
+  // A complete XSUAA binding so the bearer guard mounts on /mcp. The URL is
+  // never contacted here: a tokenless request is rejected by the guard before
+  // any upstream call or body parsing.
+  process.env.VCAP_SERVICES = JSON.stringify({
+    xsuaa: [{
+      label: 'xsuaa',
+      credentials: {
+        clientid: 'id',
+        clientsecret: 'secret',
+        url: 'https://xsuaa.example',
+        uaadomain: 'xsuaa.example',
+        xsappname: 'e2e-body-limit',
+      },
+    }],
+  });
+  let server: Server | undefined;
   try {
-    process.env.VCAP_SERVICES = JSON.stringify({
-      xsuaa: [{ label: 'xsuaa', credentials: { clientid: 'id', clientsecret: 'secret', url: 'https://xsuaa.example' } }],
-    });
-    auth = new XsuaaAuth();
-  } finally {
-    if (previousServices === undefined) delete process.env.VCAP_SERVICES;
-    else process.env.VCAP_SERVICES = previousServices;
-  }
-  assert.equal(auth.isConfigured(), true);
-  const server = createServer(createHttpServer(0, auth));
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const port = (server.address() as AddressInfo).port;
-  try {
-    for (const method of ['POST', 'GET', 'DELETE']) {
-      for (const path of ['/mcp', '/mcp/']) {
-        const status = await new Promise<number | undefined>((resolve, reject) => {
-          const req = request({
-            host: '127.0.0.1',
-            port,
-            path,
-            method,
-            headers: { 'content-type': 'application/json', 'content-length': String(49 * 1024 * 1024) },
-          }, (res) => {
-            res.resume();
-            res.on('end', () => {
-              req.destroy();
-              resolve(res.statusCode);
+    assert.equal(isXsuaaConfigured(), true);
+    server = createServer(createHttpServer(0));
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const port = (server.address() as AddressInfo).port;
+    for (const contentType of ['application/json', 'application/x-www-form-urlencoded']) {
+      for (const method of ['POST', 'GET', 'DELETE']) {
+        for (const path of ['/mcp', '/mcp/', '/MCP', '/McP/', '/MCP/unmatched']) {
+          const status = await new Promise<number | undefined>((resolve, reject) => {
+            const req = request({
+              host: '127.0.0.1',
+              port,
+              path,
+              method,
+              headers: { 'content-type': contentType, 'content-length': String(49 * 1024 * 1024) },
+            }, (res) => {
+              res.resume();
+              res.on('end', () => {
+                req.destroy();
+                resolve(res.statusCode);
+              });
             });
+            req.on('error', reject);
+            req.setTimeout(2000, () => req.destroy(new Error('Authentication waited for the body')));
+            req.flushHeaders();
           });
-          req.on('error', reject);
-          req.setTimeout(2000, () => req.destroy(new Error('Authentication waited for the body')));
-          req.flushHeaders();
-        });
-        assert.equal(status, 401, `${method} ${path} must reject before reading the body`);
+          assert.equal(status, 401, `${method} ${path} must reject before reading the body`);
+        }
       }
     }
   } finally {
-    server.closeAllConnections();
-    await new Promise<void>((resolve) => server.close(() => resolve()));
+    if (previousServices === undefined) delete process.env.VCAP_SERVICES;
+    else process.env.VCAP_SERVICES = previousServices;
+    if (server) {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   }
 });
 
 test('public and unmatched routes retain the default JSON body limit', async () => {
   const body = JSON.stringify({ pad: 'a'.repeat(200 * 1024) });
-  for (const path of ['/health', '/oauth/token', '/oauth/refresh', '/oauth/client-registration', '/missing', '/mcp/unmatched']) {
+  for (const path of ['/health', '/oauth/token', '/oauth/refresh', '/oauth/client-registration', '/missing', '/mcp/unmatched', '/MCP/unmatched']) {
     const res = await fetch(`http://127.0.0.1:${serverPort}${path}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -228,13 +243,15 @@ test('non-size JSON errors and URL-encoded parameter errors retain Express respo
       status: 413,
     },
   ]) {
-    const res = await fetch(`http://127.0.0.1:${serverPort}/mcp`, {
-      method: 'POST',
-      headers: { 'content-type': contentType },
-      body,
-    });
-    assert.equal(res.status, status);
-    assert.match(res.headers.get('content-type') ?? '', /text\/html/);
-    await res.text();
+    for (const path of ['/mcp', '/MCP', '/McP/']) {
+      const res = await fetch(`http://127.0.0.1:${serverPort}${path}`, {
+        method: 'POST',
+        headers: { 'content-type': contentType },
+        body,
+      });
+      assert.equal(res.status, status);
+      assert.match(res.headers.get('content-type') ?? '', /text\/html/);
+      await res.text();
+    }
   }
 });

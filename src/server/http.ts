@@ -1,53 +1,77 @@
 // =============================================================================
 // HTTP Server
 //
-// Creates and configures an Express application with:
-//   - JSON body parser + CORS
-//   - Optional XSUAA JWT validation middleware
-//   - Request logging
-//   - Health check
-//   - OAuth2 endpoints (when XSUAA is configured):
-//       GET  /.well-known/oauth-authorization-server  RFC 8414 discovery
-//       GET  /.well-known/oauth-protected-resource    RFC 9728 protected-resource metadata
-//       GET  /oauth/authorize                          Start OAuth flow
-//       GET  /oauth/callback                           XSUAA → client redirect
-//       GET  /oauth/token                              Token endpoint (GET form)
-//       POST /oauth/token                              Token endpoint (POST)
-//       POST /oauth/refresh                            Refresh token endpoint
-//       GET  /oauth/client-registration                Static client info
-//       POST /oauth/client-registration                Static client registration
+// Express application with JSON body parsing, CORS, request logging, and a
+// health check — plus inbound authentication via `@arc-mcp/xsuaa-auth`:
+// the MCP-native XSUAA OAuth proxy (RFC 8414 discovery + RFC 7591 stateless
+// dynamic client registration + an HMAC-signed `/oauth/callback` proxy) and a
+// XSUAA bearer verifier. The `/mcp` protocol routes
+// (POST/GET/DELETE) are registered by the entry point (src/index.ts) after
+// transport initialisation; they sit behind the bearer guard mounted here.
 //
-// MCP protocol routes (POST /mcp, GET /mcp, DELETE /mcp) are registered
-// by the entry point (src/index.ts) after transport initialisation.
+// Auth-only model: the verifier extracts no MCP-level scopes
+// (`scopesSupported: []`, no `requiredScopes`) — a valid XSUAA token is
+// sufficient at the transport, and the per-tool `requiredScope` policy
+// (src/tools/registry.ts) gates individual tools against the caller JWT the
+// verifier attaches at `req.auth.token`. When no XSUAA service is bound (local
+// / stdio dev) `/mcp` is left open and a warning is logged.
+//
+// Security notes (fork hardening on top of PR #5):
+//   - F17 token logging: the request logger redacts the query string, so auth
+//     codes / refresh tokens that ride in a URL never reach the logs.
+//   - F17 Host-header poisoning: the OAuth discovery/metadata URLs are built
+//     from a configured public base URL (`PUBLIC_BASE_URL` env var) or the CF
+//     route (`VCAP_APPLICATION`), never from the request `Host` header.
 // =============================================================================
 
-import { randomUUID } from 'node:crypto';
-import { createRequire } from 'node:module';
-import express, { type Express, type Request, type Response, type NextFunction } from 'express';
+import {
+  type Logger as AuthLogger,
+  type XsuaaCredentials,
+  loadXsuaaCredentials,
+  resolveAppUrl,
+} from '@arc-mcp/xsuaa-auth';
 import cors from 'cors';
+import express, { type Express, type NextFunction, type Request, type Response } from 'express';
+import { createRequire } from 'node:module';
 import { logger } from '../utils/logger.js';
-import { type XsuaaAuth } from '../auth/xsuaa-auth.js';
+import { setupXsuaaAuth } from './oauth.js';
 
 // Package version, read from package.json so /health stays in sync with releases.
 const { version: packageVersion } = createRequire(import.meta.url)('../../package.json') as {
   version: string;
 };
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+/**
+ * Environment variable naming the public base URL this server advertises in its
+ * OAuth discovery / protected-resource metadata. Set it when the app is reached
+ * through a reverse proxy on a different host than the CF route. It must be an
+ * HTTP(S) origin without a base path, query, fragment, or credentials. When
+ * unset, {@link resolveAppUrl} falls back to the `VCAP_APPLICATION` route and
+ * then a `localhost` default — in no case the request `Host` header (F17).
+ */
+export const PUBLIC_URL_ENV_VAR = 'PUBLIC_BASE_URL';
 
-function getBaseUrl(req: Request): string {
-  const proto = (req.headers['x-forwarded-proto'] as string) || req.protocol;
-  return `${proto}://${req.get('host')}`;
+/**
+ * Redact the query string from a request URL before it is logged. Callback
+ * URLs carry authorization codes, and arbitrary request queries may contain
+ * other credentials even when the endpoint rejects them. Logging
+ * `req.originalUrl` verbatim would leak them into the (BTP-visible) application
+ * log (F17). Keep the path for diagnostics and collapse every query to a fixed
+ * marker rather than relying on a list of known sensitive parameter names.
+ */
+export function redactUrlForLog(originalUrl: string): string {
+  const q = originalUrl.indexOf('?');
+  if (q === -1) return originalUrl;
+  return `${originalUrl.slice(0, q)}?<redacted>`;
 }
 
 /** An async Express route handler (the MCP endpoints are all async). */
 export type AsyncRouteHandler = (req: Request, res: Response) => Promise<void>;
 
 /**
- * Wrap an async Express handler so a rejected promise returns a 500 JSON-RPC
- * error instead of becoming an unhandled rejection. Express 4 does not await
- * route handlers, so an un-awaited throw otherwise crashes the process (and CF
- * then crash-loops the app).
+ * Keep rejected MCP handler promises in the JSON-RPC error contract instead
+ * of forwarding them to Express 5's default error handler. If a response has
+ * already started, end it rather than attempting a second error response.
  */
 export function asyncHandler(fn: AsyncRouteHandler): (req: Request, res: Response) => void {
   return (req, res) => {
@@ -68,44 +92,72 @@ export function asyncHandler(fn: AsyncRouteHandler): (req: Request, res: Respons
   };
 }
 
-// In-memory store for MCP-Inspector OAuth proxy state (short-lived, <10 min).
-// Maps `state` → { mcpRedirectUri, code_challenge, … }
-const mcpProxyStates = new Map<
-  string,
-  {
-    mcpRedirectUri: string;
-    state: string;
-    codeChallenge?: string;
-    codeChallengeMethod?: string;
-    timestamp: number;
-  }
->();
-
-function purgeStaleMcpStates(): void {
-  const cutoff = Date.now() - 10 * 60 * 1000; // 10 minutes
-  for (const [key, value] of mcpProxyStates) {
-    if (value.timestamp < cutoff) mcpProxyStates.delete(key);
-  }
-}
-
-// ── Factory ───────────────────────────────────────────────────────────────────
+// Adapt the winston logger to the `@arc-mcp/xsuaa-auth` structural Logger.
+// Both use `(message, data)` argument order, so this just forwards.
+const authLogger: AuthLogger = {
+  debug: (message, data) => logger.debug(message, data),
+  info: (message, data) => logger.info(message, data),
+  warn: (message, data) => logger.warn(message, data),
+  error: (message, data) => logger.error(message, data),
+};
 
 /**
- * Creates an Express application pre-configured with middleware and OAuth endpoints.
- *
- * @param port - TCP port (used only for log context during setup)
- * @param auth - XsuaaAuth instance; OAuth endpoints are registered only when
- *               `auth.isConfigured()` returns true.
+ * Load the bound XSUAA credentials, or `undefined` when none is bound (local /
+ * stdio dev — `/mcp` is then left open). An invalid binding rejects startup.
  */
-export function createHttpServer(port: number, auth: XsuaaAuth): Express {
+function loadXsuaa(): XsuaaCredentials | undefined {
+  if (process.env.VCAP_SERVICES === undefined) return undefined;
+  const services = JSON.parse(process.env.VCAP_SERVICES);
+  if (!services || typeof services !== 'object' || Array.isArray(services)) {
+    throw new Error('VCAP_SERVICES must be an object');
+  }
+  if (services.xsuaa === undefined || (Array.isArray(services.xsuaa) && services.xsuaa.length === 0)) {
+    return undefined;
+  }
+  if (!Array.isArray(services.xsuaa)) throw new Error('Invalid XSUAA binding');
+  return loadXsuaaCredentials();
+}
+
+/**
+ * Whether a complete XSUAA binding is present. When `true`, the HTTP transport
+ * mounts the bearer guard on `/mcp` (every request carries a verified caller
+ * JWT), so per-tool `requiredScope` enforcement is meaningful. The entry point
+ * uses this to decide `enforceScopes`; it must agree with {@link createHttpServer}'s
+ * own `loadXsuaa()` decision so scope enforcement is on exactly when `/mcp` is
+ * guarded.
+ */
+export function isXsuaaConfigured(): boolean {
+  return loadXsuaa() !== undefined;
+}
+
+/**
+ * Creates an Express application pre-configured with body parsing, CORS, request
+ * logging, a health check, and — when an XSUAA service is bound — the MCP-native
+ * OAuth proxy plus a bearer guard on `/mcp` (via `@arc-mcp/xsuaa-auth`).
+ *
+ * @param port - TCP port; used for the OAuth-metadata URL fallback and logging.
+ */
+export function createHttpServer(port: number): Express {
   const app = express();
 
-  // ---------------------------------------------------------------------------
-  // CORS
-  // ---------------------------------------------------------------------------
+  // ── Body parsing ────────────────────────────────────────────────────────────
+  // Parse non-/mcp bodies (OAuth token/registration, discovery, health) at the
+  // default limit. All /mcp* paths are parsed later, AFTER the bearer guard, so
+  // an unauthenticated caller cannot force body buffering when XSUAA is bound.
+  const isMcpPath = (req: Request): boolean => {
+    const path = req.path.toLowerCase();
+    return path === '/mcp' || path.startsWith('/mcp/');
+  };
+  app.use((req: Request, res: Response, next: NextFunction) =>
+    isMcpPath(req) ? next() : express.json()(req, res, next),
+  );
+  app.use((req: Request, res: Response, next: NextFunction) =>
+    isMcpPath(req) ? next() : express.urlencoded({ extended: false })(req, res, next),
+  );
+
+  // ── CORS ──────────────────────────────────────────────────────────────────────
   const isProduction = process.env.NODE_ENV === 'production';
   const corsOrigin = process.env.CORS_ORIGIN;
-
   app.use(
     cors({
       origin: isProduction ? (corsOrigin ?? false) : true,
@@ -122,44 +174,18 @@ export function createHttpServer(port: number, auth: XsuaaAuth): Express {
     }),
   );
 
-  // ---------------------------------------------------------------------------
-  // JWT extraction / optional XSUAA validation
-  //
-  // Keep authentication before route-scoped upload parsing so unauthenticated
-  // callers cannot force large-body buffering when XSUAA is bound. See
-  // XsuaaAuth.requireAuth() for token rejection and request token attachment.
-  // ---------------------------------------------------------------------------
-  app.use('/mcp', auth.requireAuth() as unknown as (req: Request, res: Response, next: NextFunction) => void);
-
-  app.all('/mcp', express.json({ limit: '50mb' }), (err: Error & { type?: string }, req: Request, res: Response, next: NextFunction) => {
-    if (res.headersSent || err.type !== 'entity.too.large') {
-      next(err);
-      return;
-    }
-    logger.warn('Request body exceeds limit', { limit: '50mb', url: req.originalUrl });
-    res.status(413).json({
-      jsonrpc: '2.0',
-      error: {
-        code: -32600,
-        message: 'Request body too large: exceeds the limit of 50mb.',
-      },
-      id: null,
-    });
-  });
-
-  app.use(express.json());
-  app.use(express.urlencoded({ extended: false }));
-
-  // ---------------------------------------------------------------------------
-  // Request logging
-  // ---------------------------------------------------------------------------
+  // ── Request logging ───────────────────────────────────────────────────────────
+  // The URL is redacted (F17): OAuth endpoints carry auth codes / refresh tokens
+  // in the query string, and logging them verbatim leaks credentials into the
+  // application log. Keep the path for diagnostics; drop the query string.
   app.use((req: Request, res: Response, next: NextFunction) => {
     const start = Date.now();
+    const safeUrl = redactUrlForLog(req.originalUrl);
     res.on('finish', () => {
       const duration = Date.now() - start;
-      logger.info(`${req.method} ${req.originalUrl} ${res.statusCode} - ${duration}ms`, {
+      logger.info(`${req.method} ${safeUrl} ${res.statusCode} - ${duration}ms`, {
         method: req.method,
-        url: req.originalUrl,
+        url: safeUrl,
         statusCode: res.statusCode,
         duration,
       });
@@ -167,273 +193,69 @@ export function createHttpServer(port: number, auth: XsuaaAuth): Express {
     next();
   });
 
-  // ---------------------------------------------------------------------------
-  // Health check
-  // ---------------------------------------------------------------------------
+  // ── Health check (always unauthenticated) ──────────────────────────────────────
+  const credentials = loadXsuaa();
   app.get('/health', (_req: Request, res: Response) => {
     res.json({
       status: 'ok',
       timestamp: new Date().toISOString(),
       version: packageVersion,
-      oauth: auth.isConfigured(),
+      oauth: credentials !== undefined,
     });
   });
 
-  // ---------------------------------------------------------------------------
-  // OAuth endpoints — only wired when XSUAA service is bound
-  // ---------------------------------------------------------------------------
-  if (auth.isConfigured()) {
-    logger.info('XSUAA configured — OAuth endpoints enabled');
-
-    // ── RFC 8414 Authorization Server Metadata ───────────────────────────────
-    app.get(
-      ['/.well-known/oauth-authorization-server', '/.well-known/oauth-authorization-server/mcp'],
-      (req: Request, res: Response) => {
-        const metadata = auth.getDiscoveryMetadata(getBaseUrl(req));
-        if (!metadata) {
-          res.status(503).json({ error: 'OAuth not configured' });
-          return;
-        }
-        res.setHeader('Cache-Control', 'public, max-age=3600');
-        res.json(metadata);
-      },
-    );
-
-    // ── RFC 9728 Protected Resource Metadata ─────────────────────────────────
-    app.get(
-      ['/.well-known/oauth-protected-resource', '/.well-known/oauth-protected-resource/mcp'],
-      (req: Request, res: Response) => {
-        const baseUrl = getBaseUrl(req);
-        res.setHeader('Cache-Control', 'public, max-age=3600');
-        res.json({
-          resource: baseUrl,
-          authorization_servers: [baseUrl],
-          bearer_methods_supported: ['header'],
-        });
-      },
-    );
-
-    // ── Start OAuth flow ─────────────────────────────────────────────────────
-    // MCP Inspector calls this with redirect_uri pointing back to itself.
-    // We store the mapping (state → mcpRedirectUri) and forward the request
-    // to XSUAA using OUR /oauth/callback as the redirect URI.
-    app.get('/oauth/authorize', (req: Request, res: Response) => {
-      try {
-        const state = (req.query['state'] as string | undefined) ?? randomUUID();
-        const mcpRedirectUri = req.query['redirect_uri'] as string | undefined;
-        const codeChallenge = req.query['code_challenge'] as string | undefined;
-        const codeChallengeMethod = req.query['code_challenge_method'] as string | undefined;
-        const baseUrl = getBaseUrl(req);
-
-        if (!mcpRedirectUri) {
-          res.status(400).json({ error: 'Missing required parameter: redirect_uri' });
-          return;
-        }
-
-        purgeStaleMcpStates();
-        mcpProxyStates.set(state, {
-          mcpRedirectUri,
-          state,
-          codeChallenge,
-          codeChallengeMethod,
-          timestamp: Date.now(),
-        });
-
-        const authUrl = auth.getAuthorizationUrl(state, baseUrl);
-        logger.debug('OAuth authorize — redirecting to XSUAA', { state, mcpRedirectUri });
-        res.redirect(authUrl);
-      } catch (err) {
-        logger.error('OAuth authorize failed', { error: String(err) });
-        res.status(500).json({ error: 'Failed to initiate OAuth flow' });
-      }
-    });
-
-    // ── XSUAA callback ───────────────────────────────────────────────────────
-    // XSUAA redirects here after the user authenticates.
-    // We look up the original MCP Inspector redirect URI by state and forward.
-    app.get('/oauth/callback', (req: Request, res: Response) => {
-      try {
-        const code = req.query['code'] as string | undefined;
-        const state = req.query['state'] as string | undefined;
-        const error = req.query['error'] as string | undefined;
-
-        if (error) {
-          const description = (req.query['error_description'] as string | undefined) ?? error;
-          logger.warn('OAuth callback received error from XSUAA', { error, description });
-          res.status(400).send(errorPage('Authentication Failed', description));
-          return;
-        }
-
-        if (!code || !state) {
-          res.status(400).send(errorPage('Bad Request', 'Missing code or state parameter'));
-          return;
-        }
-
-        const proxyInfo = mcpProxyStates.get(state);
-        if (!proxyInfo) {
-          logger.warn('OAuth callback — state not found', { state });
-          res.status(400).send(errorPage('Session Expired', 'OAuth state not found. Please restart the authentication flow.'));
-          return;
-        }
-
-        mcpProxyStates.delete(state);
-
-        const redirectTarget = new URL(proxyInfo.mcpRedirectUri);
-        redirectTarget.searchParams.set('code', code);
-        redirectTarget.searchParams.set('state', state);
-
-        logger.debug('OAuth callback — redirecting to MCP client', {
-          target: redirectTarget.toString(),
-        });
-        res.redirect(redirectTarget.toString());
-      } catch (err) {
-        logger.error('OAuth callback failed', { error: String(err) });
-        res.status(500).send(errorPage('Server Error', 'An unexpected error occurred'));
-      }
-    });
-
-    // ── Token endpoint (GET + POST) ───────────────────────────────────────────
-    const tokenHandler = async (req: Request, res: Response): Promise<void> => {
-      try {
-        const body = (req.method === 'GET' ? req.query : req.body) as Record<string, string>;
-        const grantType = body['grant_type'];
-
-        if (grantType === 'authorization_code' || body['code']) {
-          const code = body['code'];
-          if (!code) {
-            res.status(400).json({ error: 'invalid_request', error_description: 'Missing parameter: code' });
-            return;
-          }
-          const baseUrl = getBaseUrl(req);
-          const tokenData = await auth.exchangeCodeForToken(code, `${baseUrl}/oauth/callback`);
-          res.json(tokenData);
-        } else if (grantType === 'refresh_token' || body['refresh_token']) {
-          const refreshToken = body['refresh_token'];
-          if (!refreshToken) {
-            res.status(400).json({ error: 'invalid_request', error_description: 'Missing parameter: refresh_token' });
-            return;
-          }
-          const tokenData = await auth.refreshAccessToken(refreshToken);
-          res.json(tokenData);
-        } else {
-          res.status(400).json({
-            error: 'unsupported_grant_type',
-            error_description: 'Supported grant types: authorization_code, refresh_token',
-          });
-        }
-      } catch (err) {
-        logger.error('Token exchange failed', { error: String(err) });
-        res.status(400).json({
-          error: 'invalid_grant',
-          error_description: err instanceof Error ? err.message : 'Token exchange failed',
-        });
-      }
-    };
-
-    app.get('/oauth/token', tokenHandler);
-    app.post('/oauth/token', tokenHandler);
-
-    // ── Refresh token endpoint ────────────────────────────────────────────────
-    app.post('/oauth/refresh', async (req: Request, res: Response) => {
-      try {
-        const refreshToken = (req.body as Record<string, string>)['refresh_token']
-          ?? (req.body as Record<string, string>)['refreshToken'];
-        if (!refreshToken) {
-          res.status(400).json({
-            error: 'invalid_request',
-            error_description: 'Missing parameter: refresh_token',
-          });
-          return;
-        }
-        const tokenData = await auth.refreshAccessToken(refreshToken);
-        res.json(tokenData);
-      } catch (err) {
-        logger.error('Token refresh failed', { error: String(err) });
-        res.status(400).json({
-          error: 'invalid_grant',
-          error_description: err instanceof Error ? err.message : 'Token refresh failed',
-        });
-      }
-    });
-
-    // ── Dynamic client registration (RFC 7591) ───────────────────────────────
-    // Returns pre-configured XSUAA client credentials so MCP clients can
-    // auto-register without a real per-client provisioning flow.
-    //
-    // We echo back the client's submitted `redirect_uris` and `client_name`.
-    // RFC 7591 §3.2.1 allows the server to override these, but doing so breaks
-    // clients that trust the response (e.g. OpenWebUI overwrites its own
-    // redirect URI with whatever we return — see open-webui/open-webui
-    // `backend/open_webui/utils/oauth.py`). When the redirect URI then points
-    // back at our own /oauth/callback, the proxy redirect creates an infinite
-    // loop and authentication fails.
-    app.post('/oauth/client-registration', (req: Request, res: Response) => {
-      const creds = auth.getClientCredentials();
-      if (!creds) {
-        res.status(503).json({ error: 'OAuth not configured' });
-        return;
-      }
-      const baseUrl = getBaseUrl(req);
-      const body = (req.body ?? {}) as Record<string, unknown>;
-      const requestedRedirectUris =
-        Array.isArray(body['redirect_uris']) && body['redirect_uris'].every((u) => typeof u === 'string')
-          ? (body['redirect_uris'] as string[])
-          : null;
-      const requestedClientName =
-        typeof body['client_name'] === 'string' ? (body['client_name'] as string) : undefined;
-
-      res.json({
-        client_id: creds.clientid,
-        client_secret: creds.clientsecret,
-        client_id_issued_at: Math.floor(Date.now() / 1000),
-        client_secret_expires_at: 0,
-        redirect_uris: requestedRedirectUris ?? [`${baseUrl}/oauth/callback`],
-        grant_types: ['authorization_code', 'refresh_token'],
-        response_types: ['code'],
-        token_endpoint_auth_method: 'client_secret_basic',
-        client_name: requestedClientName ?? 'OData MCP Proxy',
-        registration_client_uri: `${baseUrl}/oauth/client-registration`,
-        'x-xsuaa-metadata': {
-          url: creds.url,
-          identityzone: creds.identityzone,
-          uaadomain: creds.uaadomain ?? creds.url.replace(/^https?:\/\//, ''),
-        },
-      });
-    });
-
-    app.get('/oauth/client-registration', (req: Request, res: Response) => {
-      const baseUrl = getBaseUrl(req);
-      res.setHeader('Cache-Control', 'public, max-age=3600');
-      res.json({
-        registration_endpoint: `${baseUrl}/oauth/client-registration`,
-        client_registration_types_supported: ['static'],
-        static_client_available: true,
-      });
-    });
+  // ── Inbound auth: XSUAA OAuth proxy + bearer guard on /mcp ──────────────────────
+  // The metadata URLs are resolved from a configured public base URL (or the CF
+  // route), never the request Host header (F17 Host-poisoning of the cacheable
+  // discovery document).
+  let bearer;
+  if (credentials) {
+    const appUrl = new URL(resolveAppUrl(process.env, { port, publicUrlEnvVar: PUBLIC_URL_ENV_VAR }));
+    if (!['http:', 'https:'].includes(appUrl.protocol) || appUrl.pathname !== '/' ||
+        appUrl.search || appUrl.hash || appUrl.username || appUrl.password) {
+      throw new Error('PUBLIC_BASE_URL must be an HTTP(S) origin without a base path');
+    }
+    bearer = setupXsuaaAuth(app, credentials, appUrl.origin, authLogger);
+  }
+  if (bearer) {
+    app.use('/mcp', bearer);
+    logger.info('XSUAA OAuth proxy enabled — /mcp requires a valid bearer token');
   } else {
-    logger.info('XSUAA not configured — OAuth endpoints disabled');
+    logger.warn(
+      'XSUAA not configured — /mcp is UNAUTHENTICATED (local / stdio dev). Do not expose publicly.',
+    );
   }
 
-  // ---------------------------------------------------------------------------
-  // MCP protocol endpoints are wired up by the entry point (src/index.ts)
-  // after transport initialisation.
-  // ---------------------------------------------------------------------------
+  // ── /mcp body parsing ───────────────────────────────────────────────────────
+  // Mounted after the bearer guard so unauthenticated callers cannot force
+  // body buffering when XSUAA is bound (the guard 401s /mcp* first). The exact
+  // /mcp route accepts up to 50mb (artifact uploads are base64 payloads) and
+  // returns a 413 JSON-RPC error when exceeded; unmatched /mcp/* subpaths and
+  // urlencoded bodies keep Express's default limits and responses.
+  app.all(
+    '/mcp',
+    express.json({ limit: '50mb' }),
+    (err: Error & { type?: string }, req: Request, res: Response, next: NextFunction) => {
+      if (res.headersSent || err.type !== 'entity.too.large') {
+        next(err);
+        return;
+      }
+      logger.warn('Request body exceeds limit', { limit: '50mb', url: redactUrlForLog(req.originalUrl) });
+      res.status(413).json({
+        jsonrpc: '2.0',
+        error: { code: -32600, message: 'Request body too large: exceeds the limit of 50mb.' },
+        id: null,
+      });
+    },
+  );
+  app.use('/mcp', express.json());
+  app.use('/mcp', express.urlencoded({ extended: false }));
 
-  logger.debug('Express application created', { port, oauth: auth.isConfigured() });
+  // The MCP protocol endpoints (POST/GET/DELETE /mcp) are registered by the entry
+  // point after transport initialisation; they run behind the guard mounted above.
 
+  logger.debug('Express application created', { port, oauth: credentials !== undefined });
   return app;
-}
-
-// ── Utilities ─────────────────────────────────────────────────────────────────
-
-function errorPage(title: string, message: string): string {
-  return `<!DOCTYPE html>
-<html lang="en">
-<head><meta charset="utf-8"><title>${title}</title>
-<style>body{font-family:sans-serif;text-align:center;padding:2rem}h1{color:#d32f2f}a{display:inline-block;margin-top:1rem;padding:.5rem 1.5rem;background:#1976d2;color:#fff;border-radius:4px;text-decoration:none}</style>
-</head>
-<body><h1>❌ ${title}</h1><p>${message}</p>
-<a href="/oauth/authorize">Try again</a></body></html>`;
 }
 
 /**

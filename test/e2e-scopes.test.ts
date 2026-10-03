@@ -18,11 +18,13 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, type Server } from 'node:http';
+import { createServer as createHttpsServer } from 'node:https';
 import type { AddressInfo } from 'node:net';
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { createSign, generateKeyPairSync } from 'node:crypto';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
@@ -341,9 +343,14 @@ test('HTTP with XSUAA bound: a request without a bearer token is rejected', asyn
       }),
     });
     assert.equal(response.status, 401);
+    // The bearer guard now comes from the MCP SDK's `requireBearerAuth`
+    // (via `@arc-mcp/xsuaa-auth`), which rejects a tokenless request with the
+    // standard RFC 6750 `invalid_token` body rather than the previous
+    // hand-rolled shape. The security property under test — a request without
+    // a bearer token is rejected with 401 — is unchanged.
     assert.deepEqual(await response.json(), {
-      error: 'unauthorized',
-      error_description: 'Missing Bearer token',
+      error: 'invalid_token',
+      error_description: 'Missing Authorization header',
     });
   } finally {
     await stopHttp(child);
@@ -353,12 +360,53 @@ test('HTTP with XSUAA bound: a request without a bearer token is rejected', asyn
 // ─── HTTP with XSUAA: scopes on navigation tools ─────────────────────────────
 
 /**
- * A fake XSUAA binding that trusts a locally generated key, and a signer for
- * tokens @sap/xssec accepts against it. Tokens carry no `jku`/`kid`, so xssec
- * verifies them with the binding's `verificationkey` without fetching keys.
+ * A fake XSUAA binding plus a token signer for end-to-end scope tests.
+ *
+ * The adopted `@arc-mcp/xsuaa-auth` verifier validates bearer tokens with
+ * `@sap/xssec` v4, which fetches the signing JWKS over HTTPS from the binding's
+ * `uaadomain` (`https://<uaadomain>/token_keys`) rather than using an offline
+ * `verificationkey`. So this helper stands up a local HTTPS endpoint that serves
+ * the generated public key as a JWKS; the spawned server trusts its self-signed
+ * certificate via `NODE_TLS_REJECT_UNAUTHORIZED=0` (test-only). `close()` shuts
+ * the endpoint down.
  */
-function fakeXsuaa() {
+async function fakeXsuaa(): Promise<{
+  vcap: unknown;
+  sign: (scopes: string[]) => string;
+  close: () => Promise<void>;
+}> {
   const { publicKey, privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const jwk = publicKey.export({ format: 'jwk' }) as Record<string, unknown>;
+  jwk.kid = 'e2e-key';
+  jwk.use = 'sig';
+  jwk.alg = 'RS256';
+
+  // Self-signed TLS cert for the HTTPS JWKS endpoint (xssec requires HTTPS).
+  const dir = mkdtempSync(join(tmpdir(), 'e2e-xsuaa-'));
+  const keyFile = join(dir, 'tls-key.pem');
+  const certFile = join(dir, 'tls-cert.pem');
+  execFileSync(
+    'openssl',
+    ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', keyFile, '-out', certFile,
+      '-days', '1', '-subj', '/CN=127.0.0.1'],
+    { stdio: 'ignore' },
+  );
+
+  const jwksServer = createHttpsServer(
+    { key: readFileSync(keyFile), cert: readFileSync(certFile) },
+    (req, res) => {
+      if ((req.url ?? '').startsWith('/token_keys')) {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ keys: [jwk] }));
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    },
+  );
+  await new Promise<void>((resolve) => jwksServer.listen(0, '127.0.0.1', resolve));
+  const uaadomain = `127.0.0.1:${(jwksServer.address() as AddressInfo).port}`;
+
   const vcap = {
     xsuaa: [{
       label: 'xsuaa',
@@ -367,33 +415,37 @@ function fakeXsuaa() {
       credentials: {
         clientid: 'sb-e2e',
         clientsecret: 'secret',
-        url: baseUrl,
-        uaadomain: '127.0.0.1',
+        url: `https://${uaadomain}`,
+        uaadomain,
         xsappname: 'e2e',
-        verificationkey: publicKey.export({ type: 'spki', format: 'pem' }).toString(),
       },
     }],
   };
   const part = (o: unknown) => Buffer.from(JSON.stringify(o)).toString('base64url');
   const sign = (scopes: string[]): string => {
     const now = Math.floor(Date.now() / 1000);
-    const unsigned = `${part({ alg: 'RS256', typ: 'JWT' })}.${part({
+    const unsigned = `${part({ alg: 'RS256', typ: 'JWT', kid: 'e2e-key' })}.${part({
+      iss: `https://${uaadomain}/oauth/token`,
       azp: 'sb-e2e', cid: 'sb-e2e', client_id: 'sb-e2e', aud: ['sb-e2e', 'e2e'],
       zid: 'e2e-zone', ext_attr: { enhancer: 'XSUAA' }, grant_type: 'client_credentials',
       scope: scopes, iat: now, exp: now + 600,
     })}`;
     return `${unsigned}.${createSign('RSA-SHA256').update(unsigned).sign(privateKey).toString('base64url')}`;
   };
-  return { vcap, sign };
+  const close = (): Promise<void> => new Promise<void>((resolve) => jwksServer.close(() => resolve()));
+  return { vcap, sign, close };
 }
 
 test('HTTP with XSUAA bound: navigation tools enforce the parent read scope', async () => {
-  const { vcap, sign } = fakeXsuaa();
+  const { vcap, sign, close: closeXsuaa } = await fakeXsuaa();
   // With VCAP_SERVICES present the SAP Cloud SDK resolves destinations by
   // name; the `destinations` env var points E2E_SCOPES_DEST at the stub.
+  // NODE_TLS_REJECT_UNAUTHORIZED=0 lets the spawned server fetch the JWKS from
+  // the fake XSUAA's self-signed HTTPS endpoint (test-only).
   const { url, child } = await startHttp({
     VCAP_SERVICES: JSON.stringify(vcap),
     destinations: JSON.stringify([{ name: 'E2E_SCOPES_DEST', url: baseUrl }]),
+    NODE_TLS_REJECT_UNAUTHORIZED: '0',
   });
 
   async function connectAs(scopes: string[]): Promise<Client> {
@@ -444,5 +496,6 @@ test('HTTP with XSUAA bound: navigation tools enforce the parent read scope', as
     }
   } finally {
     await stopHttp(child);
+    await closeXsuaa();
   }
 });
