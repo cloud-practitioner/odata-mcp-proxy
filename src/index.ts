@@ -217,10 +217,31 @@ export async function start(options: StartOptions = {}): Promise<void> {
   // mount the bearer guard, so it routes through the same `isXsuaaConfigured`
   // helper. Imported dynamically to keep the stdio path free of the HTTP/auth
   // module graph.
-  const enforceScopes =
+  const xsuaaConfigured =
     config.mcpTransport === 'http'
       ? (await import('./server/http.js')).isXsuaaConfigured()
       : false;
+
+  // F5: On Cloud Foundry (VCAP_APPLICATION present) an HTTP server with no XSUAA
+  // binding is publicly routable yet unauthenticated while holding the
+  // destination's full credentials, so a missing or mislabelled binding would
+  // silently degrade to open access. Refuse to start in that posture unless an
+  // operator explicitly opts in. Local HTTP (no VCAP_APPLICATION) and stdio are
+  // unaffected, so devcontainer / Claude Desktop use keeps working.
+  if (
+    config.mcpTransport === 'http' &&
+    process.env.VCAP_APPLICATION !== undefined &&
+    !xsuaaConfigured &&
+    process.env.ALLOW_UNAUTHENTICATED_HTTP !== 'true'
+  ) {
+    throw new Error(
+      'Refusing to start: HTTP transport on Cloud Foundry without an XSUAA binding would expose ' +
+      'every tool unauthenticated while holding the destination credentials. Bind an XSUAA service, ' +
+      'or set ALLOW_UNAUTHENTICATED_HTTP=true to explicitly opt in to an unauthenticated server.',
+    );
+  }
+
+  const enforceScopes = xsuaaConfigured;
 
   // Navigation tools need no separate term: they enforce the requiredScope of
   // their parent's enabled list/get, which this check already counts.
@@ -299,11 +320,16 @@ export async function start(options: StartOptions = {}): Promise<void> {
     const { StreamableHTTPServerTransport } = await import(
       '@modelcontextprotocol/sdk/server/streamableHttp.js'
     );
-    const { createHttpServer, startHttpServer, asyncHandler } = await import(
+    const { createHttpServer, startHttpServer, asyncHandler, mcpTransportSecurity } = await import(
       './server/http.js'
     );
 
     const app = createHttpServer(config.port);
+
+    // F6: DNS-rebinding protection for the Streamable HTTP transport (loopback
+    // Host/Origin allow-list in local mode; off on Cloud Foundry, where the
+    // bearer guard protects /mcp and the router rewrites Host).
+    const transportSecurity = mcpTransportSecurity(config.port);
 
     // Active sessions (sessionId -> transport + server) for stateful mode.
     type Session = {
@@ -367,6 +393,7 @@ export async function start(options: StartOptions = {}): Promise<void> {
           sessions.set(id, { transport, server });
           logger.debug('MCP session initialized', { sessionId: id });
         },
+        ...transportSecurity,
       });
 
       // Clean up when the transport closes.

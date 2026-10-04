@@ -22,6 +22,11 @@
 //   - F17 Host-header poisoning: the OAuth discovery/metadata URLs are built
 //     from a configured public base URL (`PUBLIC_BASE_URL` env var) or the CF
 //     route (`VCAP_APPLICATION`), never from the request `Host` header.
+//   - F6 local HTTP posture: outside Cloud Foundry the server binds loopback
+//     ({@link httpBindHost}), restricts CORS to loopback origins instead of
+//     reflecting any origin with credentials ({@link resolveCorsOrigin}), and
+//     the Streamable HTTP transport enables DNS-rebinding protection pinned to
+//     loopback Host/Origin ({@link mcpTransportSecurity}).
 // =============================================================================
 
 import {
@@ -30,7 +35,7 @@ import {
   loadXsuaaCredentials,
   resolveAppUrl,
 } from '@arc-mcp/xsuaa-auth';
-import cors from 'cors';
+import cors, { type CorsOptions } from 'cors';
 import express, { type Express, type NextFunction, type Request, type Response } from 'express';
 import { createRequire } from 'node:module';
 import { logger } from '../utils/logger.js';
@@ -131,6 +136,60 @@ export function isXsuaaConfigured(): boolean {
 }
 
 /**
+ * TCP interface the HTTP server binds. On Cloud Foundry (`VCAP_APPLICATION`)
+ * the platform router forwards external traffic to the app, so it must listen
+ * on all interfaces; a local-dev server binds loopback so a page or host
+ * elsewhere on the network cannot reach it (F6). stdio never calls this.
+ */
+export function httpBindHost(): string {
+  return process.env.VCAP_APPLICATION !== undefined ? '0.0.0.0' : '127.0.0.1';
+}
+
+/**
+ * Resolve the CORS `origin` option. Reflecting an arbitrary caller's `Origin`
+ * while `credentials: true` lets any web page read authenticated responses, so
+ * even in local/dev mode the allow-list is restricted to loopback origins (plus
+ * an explicit `CORS_ORIGIN`) rather than reflecting every request (F6). In
+ * production the allow-list is the configured `CORS_ORIGIN`, or nothing.
+ *
+ * @param port - TCP port the server listens on, used to build the loopback origins.
+ */
+export function resolveCorsOrigin(port: number): CorsOptions['origin'] {
+  const configured = process.env.CORS_ORIGIN;
+  if (process.env.NODE_ENV === 'production') {
+    return configured ?? false;
+  }
+  const origins = [`http://127.0.0.1:${port}`, `http://localhost:${port}`];
+  if (configured) origins.push(configured);
+  return origins;
+}
+
+/**
+ * DNS-rebinding protection options for the Streamable HTTP transport. A local
+ * server that binds loopback must still reject requests whose `Host`/`Origin`
+ * is not loopback, so a DNS-rebinding web page cannot drive it (F6). On Cloud
+ * Foundry the router rewrites `Host` to the app's public route, so pinning to
+ * loopback would reject every real request; there the XSUAA bearer guard
+ * protects `/mcp`, so protection is left off.
+ *
+ * @param port - TCP port the server listens on, used to build the allow-lists.
+ */
+export function mcpTransportSecurity(port: number): {
+  enableDnsRebindingProtection: boolean;
+  allowedHosts?: string[];
+  allowedOrigins?: string[];
+} {
+  if (process.env.VCAP_APPLICATION !== undefined) {
+    return { enableDnsRebindingProtection: false };
+  }
+  return {
+    enableDnsRebindingProtection: true,
+    allowedHosts: [`127.0.0.1:${port}`, `localhost:${port}`],
+    allowedOrigins: [`http://127.0.0.1:${port}`, `http://localhost:${port}`],
+  };
+}
+
+/**
  * Creates an Express application pre-configured with body parsing, CORS, request
  * logging, a health check, and — when an XSUAA service is bound — the MCP-native
  * OAuth proxy plus a bearer guard on `/mcp` (via `@arc-mcp/xsuaa-auth`).
@@ -156,11 +215,11 @@ export function createHttpServer(port: number): Express {
   );
 
   // ── CORS ──────────────────────────────────────────────────────────────────────
-  const isProduction = process.env.NODE_ENV === 'production';
-  const corsOrigin = process.env.CORS_ORIGIN;
+  // Never reflect an arbitrary Origin while credentials are enabled; the
+  // allow-list is loopback-only in local/dev and CORS_ORIGIN in production (F6).
   app.use(
     cors({
-      origin: isProduction ? (corsOrigin ?? false) : true,
+      origin: resolveCorsOrigin(port),
       methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
       allowedHeaders: [
         'Content-Type',
@@ -259,15 +318,21 @@ export function createHttpServer(port: number): Express {
 }
 
 /**
- * Starts the Express server on the given port.
+ * Starts the Express server on the given port and interface.
  *
  * @param app  - Application returned by {@link createHttpServer}
  * @param port - TCP port to listen on
+ * @param host - Interface to bind; defaults to {@link httpBindHost} (loopback
+ *   for local dev, all interfaces on Cloud Foundry).
  */
-export function startHttpServer(app: Express, port: number): Promise<void> {
+export function startHttpServer(
+  app: Express,
+  port: number,
+  host: string = httpBindHost(),
+): Promise<void> {
   return new Promise<void>((resolve, reject) => {
-    const server = app.listen(port, () => {
-      logger.info(`HTTP server listening on port ${port}`);
+    const server = app.listen(port, host, () => {
+      logger.info(`HTTP server listening on ${host}:${port}`);
       resolve();
     });
     server.on('error', (err: Error) => {
