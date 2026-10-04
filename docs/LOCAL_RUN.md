@@ -111,6 +111,8 @@ MCP_TRANSPORT=stdio npx tsx src/index.ts
 
 ### b) HTTP Mode (for Testing and Debugging)
 
+For listener and browser-origin restrictions, see the [HTTP transport reference](../README.md#http-streamable-http).
+
 Set `MCP_TRANSPORT=http` (the default). The server starts an Express HTTP
 server with:
 

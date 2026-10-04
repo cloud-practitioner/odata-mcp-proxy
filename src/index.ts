@@ -326,9 +326,9 @@ export async function start(options: StartOptions = {}): Promise<void> {
 
     const app = createHttpServer(config.port);
 
-    // F6: DNS-rebinding protection for the Streamable HTTP transport (loopback
-    // Host/Origin allow-list in local mode; off on Cloud Foundry, where the
-    // bearer guard protects /mcp and the router rewrites Host).
+    // Apply the local transport allow-lists to every session (F6). Cloud Foundry
+    // instead relies on the authenticated startup policy above, unless the
+    // operator explicitly opts out.
     const transportSecurity = mcpTransportSecurity(config.port);
 
     // Active sessions (sessionId -> transport + server) for stateful mode.

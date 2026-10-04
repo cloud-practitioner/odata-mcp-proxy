@@ -162,7 +162,7 @@ https://<app-route>/mcp
 
 Where `<app-route>` is the URL shown in the `cf app odata-mcp-proxy` output (under `routes`).
 
-Configure your MCP client to connect to this URL. See the [HTTP transport reference](../README.md#http-streamable-http) for binding validation and unauthenticated local behavior, and [Operation Scopes](../README.md#operation-scopes) for tool-level authorization.
+Configure your MCP client to connect to this URL. See the [HTTP transport reference](../README.md#http-streamable-http) for HTTP startup and binding policy, and [Operation Scopes](../README.md#operation-scopes) for tool-level authorization.
 
 ### OAuth discovery and client registration
 
