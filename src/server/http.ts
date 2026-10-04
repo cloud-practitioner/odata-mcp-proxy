@@ -155,12 +155,18 @@ export function httpBindHost(): string {
  * @param port - TCP port the server listens on, used to build the loopback origins.
  */
 export function resolveCorsOrigin(port: number): CorsOptions['origin'] {
-  const configured = process.env.CORS_ORIGIN;
   if (process.env.NODE_ENV === 'production') {
-    return configured ?? false;
+    return process.env.CORS_ORIGIN ?? false;
   }
-  const origins = [`http://127.0.0.1:${port}`, `http://localhost:${port}`];
-  if (configured) origins.push(configured);
+  return localAllowedOrigins(port);
+}
+
+function localAllowedOrigins(port: number): string[] {
+  const origins = [
+    new URL(`http://127.0.0.1:${port}`).origin,
+    new URL(`http://localhost:${port}`).origin,
+  ];
+  if (process.env.CORS_ORIGIN) origins.push(process.env.CORS_ORIGIN);
   return origins;
 }
 
@@ -184,8 +190,12 @@ export function mcpTransportSecurity(port: number): {
   }
   return {
     enableDnsRebindingProtection: true,
-    allowedHosts: [`127.0.0.1:${port}`, `localhost:${port}`],
-    allowedOrigins: [`http://127.0.0.1:${port}`, `http://localhost:${port}`],
+    allowedHosts: [
+      `127.0.0.1:${port}`,
+      `localhost:${port}`,
+      ...(port === 80 ? ['127.0.0.1', 'localhost'] : []),
+    ],
+    allowedOrigins: localAllowedOrigins(port),
   };
 }
 
@@ -322,14 +332,9 @@ export function createHttpServer(port: number): Express {
  *
  * @param app  - Application returned by {@link createHttpServer}
  * @param port - TCP port to listen on
- * @param host - Interface to bind; defaults to {@link httpBindHost} (loopback
- *   for local dev, all interfaces on Cloud Foundry).
  */
-export function startHttpServer(
-  app: Express,
-  port: number,
-  host: string = httpBindHost(),
-): Promise<void> {
+export function startHttpServer(app: Express, port: number): Promise<void> {
+  const host = httpBindHost();
   return new Promise<void>((resolve, reject) => {
     const server = app.listen(port, host, () => {
       logger.info(`HTTP server listening on ${host}:${port}`);

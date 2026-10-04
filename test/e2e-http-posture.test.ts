@@ -61,6 +61,9 @@ async function startHttp(extra: Record<string, string>): Promise<Booted> {
       PORT: String(port),
       API_CONFIG_FILE: configPath,
       LOG_LEVEL: 'info',
+      ALLOW_UNAUTHENTICATED_HTTP: 'false',
+      NODE_ENV: 'development',
+      CORS_ORIGIN: '',
       ...extra,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -93,7 +96,10 @@ async function stopHttp(child: ChildProcess): Promise<void> {
 }
 
 /** Spawn and wait for the process to exit, capturing output and exit code. */
-async function bootAndExit(extra: Record<string, string>): Promise<{ status: number | null; output: string }> {
+async function bootAndExit(
+  extra: Record<string, string>,
+  timeoutMs = 15_000,
+): Promise<{ status: number | null; output: string }> {
   assert.ok(existsSync(serverEntry), 'dist/index.js missing — run `npm run build` first');
   const port = await freePort();
   const env = { ...(process.env as Record<string, string>) };
@@ -107,6 +113,9 @@ async function bootAndExit(extra: Record<string, string>): Promise<{ status: num
       PORT: String(port),
       API_CONFIG_FILE: configPath,
       LOG_LEVEL: 'info',
+      ALLOW_UNAUTHENTICATED_HTTP: 'false',
+      NODE_ENV: 'development',
+      CORS_ORIGIN: '',
       ...extra,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -114,7 +123,22 @@ async function bootAndExit(extra: Record<string, string>): Promise<{ status: num
   let output = '';
   child.stdout?.on('data', (chunk: Buffer) => { output += chunk.toString('utf8'); });
   child.stderr?.on('data', (chunk: Buffer) => { output += chunk.toString('utf8'); });
-  const status = await new Promise<number | null>((resolve) => child.once('exit', (code) => resolve(code)));
+  const status = await new Promise<number | null>((resolve, reject) => {
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill('SIGKILL');
+    }, timeoutMs);
+    child.once('error', (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.once('close', (code) => {
+      clearTimeout(timer);
+      if (timedOut) reject(new Error(`server did not exit within ${timeoutMs}ms: ${output}`));
+      else resolve(code);
+    });
+  });
   return { status, output };
 }
 
@@ -152,14 +176,31 @@ function rawInitialize(port: number, host: string): Promise<{ status: number; se
 
 // ─── F5: Cloud Foundry HTTP without XSUAA fails closed ───────────────────────────
 
-test('F5: HTTP on Cloud Foundry without XSUAA refuses to start', async () => {
-  const { status, output } = await bootAndExit({
-    VCAP_APPLICATION: JSON.stringify({ application_name: 'odata-mcp-proxy' }),
-  });
-  assert.equal(status, 1, output);
-  assert.match(output, /Refusing to start/, output);
-  assert.match(output, /XSUAA/, output);
-  assert.doesNotMatch(output, /HTTP server listening/, output);
+test('F5: HTTP on Cloud Foundry without XSUAA refuses to start despite an inherited opt-in', async () => {
+  const saved = process.env.ALLOW_UNAUTHENTICATED_HTTP;
+  process.env.ALLOW_UNAUTHENTICATED_HTTP = 'true';
+  try {
+    const { status, output } = await bootAndExit({
+      VCAP_APPLICATION: JSON.stringify({ application_name: 'odata-mcp-proxy' }),
+    });
+    assert.equal(status, 1, output);
+    assert.match(output, /Refusing to start/, output);
+    assert.match(output, /XSUAA/, output);
+    assert.doesNotMatch(output, /HTTP server listening/, output);
+  } finally {
+    if (saved === undefined) delete process.env.ALLOW_UNAUTHENTICATED_HTTP;
+    else process.env.ALLOW_UNAUTHENTICATED_HTTP = saved;
+  }
+});
+
+test('bootAndExit rejects and reaps a server that remains running', async () => {
+  await assert.rejects(
+    bootAndExit({
+      VCAP_APPLICATION: JSON.stringify({ application_name: 'odata-mcp-proxy' }),
+      ALLOW_UNAUTHENTICATED_HTTP: 'true',
+    }, 1_500),
+    /server did not exit within 1500ms/,
+  );
 });
 
 test('F5: ALLOW_UNAUTHENTICATED_HTTP=true opts in to an open CF server', async () => {
@@ -202,13 +243,83 @@ test('F6: local HTTP binds loopback, rejects a foreign Host, and allows loopback
     assert.match(rebind.body, /Invalid Host header/);
 
     // A legitimate same-machine caller still gets a session.
-    const ok = await rawInitialize(port, `127.0.0.1:${port}`);
-    assert.equal(ok.status, 200, ok.body);
-    assert.ok(ok.sessionId, 'a valid Host must still be issued a session id');
+    for (const hostname of ['127.0.0.1', 'localhost']) {
+      const missingPort = await rawInitialize(port, hostname);
+      assert.equal(missingPort.status, 403, missingPort.body);
+      assert.equal(missingPort.sessionId, undefined);
+
+      const ok = await rawInitialize(port, `${hostname}:${port}`);
+      assert.equal(ok.status, 200, ok.body);
+      assert.ok(ok.sessionId, 'a valid Host must still be issued a session id');
+    }
   } finally {
     await stopHttp(child);
   }
 });
+
+for (const nodeEnv of ['development', 'production']) {
+  test(`configured browser origin can use every MCP method in ${nodeEnv}`, async () => {
+    const origin = 'http://tool.localhost:3000';
+    const { url, child } = await startHttp({ NODE_ENV: nodeEnv, CORS_ORIGIN: origin });
+    try {
+      const preflight = await fetch(`${url}/mcp`, {
+        method: 'OPTIONS',
+        headers: { Origin: origin, 'Access-Control-Request-Method': 'POST' },
+      });
+      assert.equal(preflight.headers.get('access-control-allow-origin'), origin);
+
+      const headers = {
+        Origin: origin,
+        'content-type': 'application/json',
+        accept: 'application/json, text/event-stream',
+      };
+      const init = await fetch(`${url}/mcp`, { method: 'POST', headers, body: INIT_BODY });
+      assert.equal(init.status, 200, await init.text());
+      assert.equal(init.headers.get('access-control-allow-origin'), origin);
+      const sessionId = init.headers.get('mcp-session-id');
+      assert.ok(sessionId);
+      const sessionHeaders = {
+        ...headers,
+        'mcp-session-id': sessionId,
+        'mcp-protocol-version': '2025-03-26',
+      };
+      const initializedBody = JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' });
+
+      for (const method of ['POST', 'GET', 'DELETE']) {
+        const rejected = await fetch(`${url}/mcp`, {
+          method,
+          headers: { ...sessionHeaders, Origin: 'https://evil.example' },
+          ...(method === 'POST' ? { body: initializedBody } : {}),
+        });
+        assert.equal(rejected.status, 403);
+        assert.match(await rejected.text(), /Invalid Origin header/);
+        assert.notEqual(rejected.headers.get('access-control-allow-origin'), 'https://evil.example');
+      }
+
+      const initialized = await fetch(`${url}/mcp`, {
+        method: 'POST', headers: sessionHeaders, body: initializedBody,
+      });
+      assert.equal(initialized.status, 202, await initialized.text());
+      assert.equal(initialized.headers.get('access-control-allow-origin'), origin);
+
+      const stream = await fetch(`${url}/mcp`, {
+        headers: sessionHeaders, signal: AbortSignal.timeout(5_000),
+      });
+      try {
+        assert.equal(stream.status, 200);
+        assert.equal(stream.headers.get('content-type'), 'text/event-stream');
+        assert.equal(stream.headers.get('access-control-allow-origin'), origin);
+        const deleted = await fetch(`${url}/mcp`, { method: 'DELETE', headers: sessionHeaders });
+        assert.equal(deleted.status, 200, await deleted.text());
+        assert.equal(deleted.headers.get('access-control-allow-origin'), origin);
+      } finally {
+        await stream.body?.cancel();
+      }
+    } finally {
+      await stopHttp(child);
+    }
+  });
+}
 
 test('F6: local HTTP does not reflect an arbitrary CORS origin with credentials', async () => {
   const { url, child } = await startHttp({});
