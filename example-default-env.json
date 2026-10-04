@@ -35,6 +35,7 @@
           "clientid": "your-xsuaa-client-id",
           "clientsecret": "your-xsuaa-client-secret",
           "url": "https://your-subdomain.authentication.eu10.hana.ondemand.com",
+          "uaadomain": "authentication.eu10.hana.ondemand.com",
           "xsappname": "odata-mcp-proxy"
         }
       }

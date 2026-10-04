@@ -74,7 +74,7 @@ All environment variables are optional and have sensible defaults:
 | `REQUEST_TIMEOUT`         | `60000`   | HTTP request timeout in milliseconds                   |
 | `ENABLED_API_CATEGORIES`  | `all`     | Comma-separated list of API categories to enable       |
 
-For config-file selection (`API_CONFIG_FILE`), production logging (`NODE_ENV`), and HTTP CORS (`CORS_ORIGIN`), see the [configuration reference](../README.md#configuration).
+For config-file selection (`API_CONFIG_FILE`), production logging (`NODE_ENV`), HTTP CORS (`CORS_ORIGIN`), and the public OAuth origin (`PUBLIC_BASE_URL`), see the [configuration reference](../README.md#configuration).
 
 > **Note:** On Cloud Foundry the `PORT` variable is set automatically by the platform. Do not override it.
 
@@ -162,7 +162,25 @@ https://<app-route>/mcp
 
 Where `<app-route>` is the URL shown in the `cf app odata-mcp-proxy` output (under `routes`).
 
-Configure your MCP client to connect to this URL. If XSUAA authentication is enforced, the client must obtain a valid OAuth2 token (using the XSUAA service credentials) and pass it as a `Bearer` token in the `Authorization` header.
+Configure your MCP client to connect to this URL. See the [HTTP transport reference](../README.md#http-streamable-http) for binding validation and unauthenticated local behavior, and [Operation Scopes](../README.md#operation-scopes) for tool-level authorization.
+
+### OAuth discovery and client registration
+
+Inbound OAuth uses `@arc-mcp/xsuaa-auth` with the MCP SDK router. OAuth-capable MCP clients can discover the flow through the bearer challenge's `resource_metadata` URL. Authorization-server metadata is also available at `/.well-known/oauth-authorization-server`; use its advertised endpoints rather than hard-coding the former `/oauth/authorize`, `/oauth/token`, `/oauth/refresh`, or `/oauth/client-registration` routes, which are no longer supported. The server's XSUAA callback remains `/oauth/callback`.
+
+Dynamic registration returns local client credentials, not the bound XSUAA secret. Registration accepts `token_endpoint_auth_method: "none"` for public clients or `"client_secret_post"` for confidential clients; omitting it explicitly registers and returns `"client_secret_post"`. Unsupported methods, including `"client_secret_basic"`, are rejected with `invalid_client_metadata`. Confidential clients send `client_id` and `client_secret` in the form body, not HTTP Basic authentication.
+
+Clients must use S256 PKCE. The proxy verifies the authorization code's client and redirect binding and the `code_verifier` before exchanging with XSUAA; confidential clients must also authenticate. Send token requests by POST to the discovered token endpoint; GET is rejected. Refresh uses the same endpoint with `grant_type=refresh_token`, and the refresh token is bound to the client that obtained it. Treat codes and refresh tokens as opaque proxy values, not raw XSUAA grants. Explicit upstream `invalid_grant` rejections return HTTP 400 `invalid_grant`; network, transport, and upstream server failures remain server errors.
+
+A client with an independently obtained valid XSUAA access token can instead send it directly as `Authorization: Bearer <token>` on `/mcp`. Destination credentials used for outbound backend calls are separate from this inbound authentication flow.
+
+### Redirect policy and deployment constraints
+
+The authoritative redirect allowlist is `oauth2-configuration.redirect-uris` in [xs-security.json](../xs-security.json), enforced both during registration/authorization and at the callback. The shared package's broader default allowlist is not used. XSUAA sees only the server callback, so the proxy must enforce the client's redirect target itself.
+
+The runtime reads `xs-security.json` from the **installed proxy package root**, not the working directory or the active API config. In a source deployment this is the repository's file; an npm consumer's separate `xs-security.json` provisions its XSUAA service but does not override the package's runtime allowlist. Ensure the server callback and intended client redirects are permitted by the deployed security configuration; changing the runtime policy requires shipping the updated package file as well as updating the XSUAA service configuration.
+
+Public URL selection is described in the [configuration reference](../README.md#configuration). Query strings are redacted from HTTP request logs, and untrusted callback error text is HTML-escaped. The proxy disables the SDK's per-IP limits on authorization, token, registration, and revocation endpoints; deployment-level throttling, if needed, is a separate policy. OAuth security regressions are covered in [test/e2e-auth-security.test.ts](../test/e2e-auth-security.test.ts).
 
 ## Troubleshooting
 
