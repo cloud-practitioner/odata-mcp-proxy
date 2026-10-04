@@ -99,6 +99,25 @@ test('a minimal config omitting optional fields loads with their defaults', () =
   assert.equal(config.ui?.[0].description, undefined);
 });
 
+test('a UI view may declare an optional requiredScope (F13)', () => {
+  const config = parseApiConfig({
+    server: { name: 's' },
+    apis: [{ name: 'a', destination: 'DEST', entitySets: [] }],
+    ui: [{ tool: 'UI_E', uri: 'ui://e', template: 'e.html', requiredScope: 'admin' }],
+  }, 'cfg.json');
+  assert.equal(config.ui?.[0].requiredScope, 'admin');
+
+  // Still strict: an empty string and an unknown key are rejected.
+  assert.throws(
+    () => parseApiConfig({
+      server: { name: 's' },
+      apis: [{ name: 'a', destination: 'DEST', entitySets: [] }],
+      ui: [{ tool: 'UI_E', uri: 'ui://e', template: 'e.html', requiredScope: '' }],
+    }, 'cfg.json'),
+    /ui\[0\]\.requiredScope/,
+  );
+});
+
 test('method is only accepted on update', () => {
   assert.ok(errorFor(withOperations({ get: { enabled: true, method: 'PUT' } }))
     .includes(`${OPS}.get: Unrecognized key(s) in object: 'method'`));

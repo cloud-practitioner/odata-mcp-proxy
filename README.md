@@ -357,6 +357,7 @@ Per entry:
 | `description` | no | Tool description for the LLM. |
 | `uri` | yes | `ui://` resource URI. The template is also registered as an MCP resource at this URI (with `null` data), so MCP Apps hosts that pre-fetch templates can use render-data delivery. |
 | `template` | yes | HTML template file, path relative to the config file. File reads are cached. |
+| `requiredScope` | no | Scope the caller's JWT must carry to render the view, enforced exactly like an operation's [`requiredScope`](#operation-scopes) — only under an XSUAA-authenticated caller, before any data source is fetched. Declare one when a view fetches scope-restricted data (otherwise a read-only caller could render data its entity tool would deny). |
 | `inputs` | no | Tool parameters: `{ "name": { "type": "string"\|"number"\|"boolean", "required": bool, "default": val, "min": n, "max": n, "description": "..." } }`. Compiled into the tool's input schema. A `default` is applied during parsing, so placeholders referencing that parameter always resolve; `min`/`max` bound number inputs. |
 | `data` | no | Named data sources, fetched **concurrently** on invocation through the shared OData client of the referenced `api` (the caller's JWT is forwarded, exactly like the generated entity tools). Placeholders in `path` are substituted with URL-encoded values (see below). `"optional": true` entries fail soft to `null`; a failure in any other entry returns an `isError` tool result. Each source also accepts `paginate` and `select`. |
 | `partials` | no | Literal token → file map. Each file (path relative to the config file) is inlined into the template *before* data injection — useful for shared CSS/JS. |
@@ -503,7 +504,7 @@ await start(); // identical to running `odata-mcp-proxy`
 To register extra tools or resources on every MCP session, pass `registerExtras`. It runs inside the per-session factory, after the generated entity tools, API doc resources, and config-driven UI views. It also runs for the [startup self-check](#3-add-your-api-config), so it must be safe to invoke repeatedly with different `McpServer` instances, including one that never connects to a transport. An error thrown during the self-check rejects `start()`:
 
 ```js
-import { start } from 'odata-mcp-proxy';
+import { start, authorize } from 'odata-mcp-proxy';
 
 await start({
   registerExtras(server, ctx) {
@@ -511,7 +512,9 @@ await start({
     // ctx.clientsByApi: shared ODataClient instances keyed by API name
     // ctx.apiConfig:    the loaded API config file
     // ctx.config:       the environment-derived app config
+    // ctx.scopeOptions: the resolved scope-enforcement policy (pass to authorize)
     server.registerTool('My_CustomTool', { description: '...', inputSchema: {} }, async (args, extra) => {
+      authorize('read', extra.authInfo?.token, ctx.scopeOptions); // same requiredScope policy
       const result = await ctx.clientsByApi['my-api'].execute('GET', 'Products', undefined, undefined, extra.authInfo?.token);
       return { content: [{ type: 'text', text: JSON.stringify(result) }] };
     });
@@ -519,7 +522,7 @@ await start({
 });
 ```
 
-`ODataClient`, `resolveDestination`, `createMcpServer`, `registerAllTools`, `registerApiDocResources`, and the config types are re-exported from the package root as well.
+`ODataClient`, `resolveDestination`, `createMcpServer`, `registerAllTools`, `registerApiDocResources`, the scope-policy helpers `authorize` / `checkScope` (and the `ScopeOptions` type), and the config types are re-exported from the package root as well. Gate extras tools on a `requiredScope` with `authorize(scope, extra.authInfo?.token, ctx.scopeOptions)` so they enforce exactly like the generated tools (enforcing only under an XSUAA-authenticated caller, and qualifying the scope with the bound `xsappname`) instead of silently bypassing it.
 
 **Migration note:** if you previously forked the bootstrap (copying the transport/session wiring and deep-importing from `odata-mcp-proxy/dist/...` to add your own tools), you can delete that entry point: call `start({ registerExtras })` for custom tools, and move interactive views into the config's `ui` section. Remaining deep `dist/` imports are supported via the package's `exports` map, but the root export is the supported surface. The former `dist/auth/xsuaa-auth.js` module has been removed; inbound authentication now uses `@arc-mcp/xsuaa-auth`.
 
@@ -584,13 +587,15 @@ Each entry in an entity set's `operations` is either a boolean or an object with
 }
 ```
 
-`requiredScope` is checked against the caller's JWT, so it is enforced only when the transport authenticates a caller: HTTP with an XSUAA service bound. There, `/mcp` rejects requests without a valid bearer token, and a tool call whose token lacks the scope (as `<xsappname>.<scope>` or the bare name) fails with `Forbidden`.
+`requiredScope` is checked against the caller's JWT, so it is enforced only when the transport authenticates a caller: HTTP with an XSUAA service bound. There, `/mcp` rejects requests without a valid bearer token, and a tool call whose token lacks the scope fails with `Forbidden`. The caller's scope is matched against the fully-qualified `<xsappname>.<scope>` built from the bound XSUAA application name, so another app's `.<scope>` or an XSUAA built-in such as `uaa.user` does not satisfy a bare `<scope>`. A `scope` claim issued as a space-separated string (rather than a JSON array) is handled too.
 
 Navigation tools (`<EntitySet>_<NavProperty>_list`) have no scope setting of their own. They enforce the `requiredScope` of the entity set's read operations: the call is allowed when the caller holds the scope of the enabled `list` or of the enabled `get` (`get` counts only when the entity set has keys). Either one suffices, and an enabled read operation without `requiredScope` leaves the navigation tool unscoped. The rule follows from the other ways to reach the same URL: the suffix `(<key>)/<NavProperty>` can also be passed as `path` to `<EntitySet>_list` or `<EntitySet>_get`, or navigation can be reached through an `execute_operation` `list`/`get` call with `navProperty`. Each of those checks its operation's scope. The navigation tool therefore grants exactly what those read paths grant, never more. When neither `list` nor a keyed `get` is enabled, no read path grants the navigation, so its registered navigation tools refuse every call with `Forbidden` while scopes are enforced.
 
-Over stdio, or HTTP without XSUAA, there is no caller token, so `requiredScope` is not enforced and backend access is governed by the destination's own credentials. The server logs a warning at startup when an enabled operation of a registered entity set declares a scope that will not be enforced.
+Over stdio, or HTTP without XSUAA, there is no caller token, so `requiredScope` is not enforced and backend access is governed by the destination's own credentials. The server logs a warning at startup when an enabled operation that registers a tool declares a scope that will not be enforced. A scoped `get`/`delete` on a keyless entity set registers no tool, so it does not trigger the warning.
 
-Programmatic callers of `registerAllTools` / `registerEntityTools` enforce scopes by default; pass `{ enforceScopes: false }` as the scope options to opt out.
+Interactive [UI views](#interactive-ui-views-mcp-ui) may declare their own `requiredScope`; it is enforced the same way (only under an XSUAA-authenticated caller) before the view fetches any data.
+
+Programmatic callers of `registerAllTools` / `registerEntityTools` enforce scopes by default; pass `{ enforceScopes: false }` as the scope options to opt out. The same policy is exported from the package root as `authorize`, `checkScope`, and the `ScopeOptions` type, and the resolved options are handed to `registerExtras` consumers as `ctx.scopeOptions`, so custom tools can gate on `requiredScope` identically instead of bypassing it.
 
 ---
 

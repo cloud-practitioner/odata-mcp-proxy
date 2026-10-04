@@ -17,7 +17,7 @@ import { resolveDestination } from './client/destination-service.js';
 import { ODataClient } from './client/odata-client.js';
 import { createMcpServer } from './server/mcp-server.js';
 import { SessionStore } from './server/sessions.js';
-import { registerAllTools, findUnknownCategories } from './tools/registry.js';
+import { registerAllTools, findUnknownCategories, operationRegistersTool, type EntityOperations, type ScopeOptions } from './tools/registry.js';
 import { registerApiDocResources } from './resources/index.js';
 
 // ─── Public API ──────────────────────────────────────────────────────────────
@@ -33,6 +33,14 @@ export interface ExtrasContext {
   apiConfig: ApiConfig;
   /** The environment-derived application configuration. */
   config: Config;
+  /**
+   * The resolved scope-enforcement policy the generated tools use. Extras
+   * tools that gate on a `requiredScope` must pass this to {@link authorize}
+   * (or {@link checkScope}) so they apply the same policy — enforcing only when
+   * an XSUAA-authenticated caller is present, and qualifying scopes with the
+   * bound `xsappname` — instead of silently bypassing it.
+   */
+  scopeOptions: ScopeOptions;
 }
 
 export interface StartOptions {
@@ -50,14 +58,14 @@ export interface StartOptions {
 export { ODataClient } from './client/odata-client.js';
 export { resolveDestination } from './client/destination-service.js';
 export { createMcpServer } from './server/mcp-server.js';
-export { registerAllTools } from './tools/registry.js';
+export { registerAllTools, authorize, checkScope } from './tools/registry.js';
 export { registerApiDocResources } from './resources/index.js';
 export type {
   Config, ApiConfig, ApiDefinition,
   UiViewDefinition, UiInputDefinition, UiDataSourceDefinition, UiPaginationDefinition,
   DiscoveryDefinition,
 } from './config/index.js';
-export type { EntitySetDefinition } from './tools/registry.js';
+export type { EntitySetDefinition, ScopeOptions } from './tools/registry.js';
 
 /**
  * Bootstrap and run the MCP server: create the shared OData clients, build
@@ -201,8 +209,6 @@ export async function start(options: StartOptions = {}): Promise<void> {
     });
   }
 
-  const extrasContext: ExtrasContext = { clientsByApi, apiConfig, config };
-
   // ── Scope policy ────────────────────────────────────────────────────────────
   //
   // `requiredScope` is checked against the caller's JWT (attached at
@@ -216,11 +222,15 @@ export async function start(options: StartOptions = {}): Promise<void> {
   // The XSUAA-bound check must agree with createHttpServer()'s own decision to
   // mount the bearer guard, so it routes through the same `isXsuaaConfigured`
   // helper. Imported dynamically to keep the stdio path free of the HTTP/auth
-  // module graph.
-  const xsuaaConfigured =
-    config.mcpTransport === 'http'
-      ? (await import('./server/http.js')).isXsuaaConfigured()
-      : false;
+  // module graph. The bound `xsappname` qualifies `requiredScope` so a scope is
+  // matched against the full `${xsappname}.${scope}` the token carries (F18).
+  const httpModule =
+    config.mcpTransport === 'http' ? await import('./server/http.js') : undefined;
+  const enforceScopes = httpModule?.isXsuaaConfigured() ?? false;
+  const scopeOptions: ScopeOptions = {
+    enforceScopes,
+    xsappname: httpModule?.getXsuaaAppName(),
+  };
 
   // F5: On Cloud Foundry (VCAP_APPLICATION present) an HTTP server with no XSUAA
   // binding is publicly routable yet unauthenticated while holding the
@@ -231,7 +241,7 @@ export async function start(options: StartOptions = {}): Promise<void> {
   if (
     config.mcpTransport === 'http' &&
     process.env.VCAP_APPLICATION !== undefined &&
-    !xsuaaConfigured &&
+    !enforceScopes &&
     process.env.ALLOW_UNAUTHENTICATED_HTTP !== 'true'
   ) {
     throw new Error(
@@ -241,19 +251,22 @@ export async function start(options: StartOptions = {}): Promise<void> {
     );
   }
 
-  const enforceScopes = xsuaaConfigured;
-
   // Navigation tools need no separate term: they enforce the requiredScope of
   // their parent's enabled list/get, which this check already counts.
+  //
+  // get/delete only register a tool on a keyed entity set, so a scoped
+  // get/delete on a keyless set produces no tool; `operationRegistersTool`
+  // mirrors that gating so the warning does not over-count it (F14).
   const allCategories =
     config.enabledApiCategories.length === 1 && config.enabledApiCategories[0] === 'all';
   const declaresScopes = allEntitySets
     .filter((def) => allCategories || config.enabledApiCategories.includes(def.category))
     .some((def) =>
-      Object.values(def.operations).some((op) => {
-        const resolved = resolveOperation(op);
-        return resolved.enabled && Boolean(resolved.requiredScope);
-      }),
+      (Object.entries(def.operations) as [keyof EntityOperations, (typeof def.operations)[keyof EntityOperations]][])
+        .some(([kind, op]) => {
+          const resolved = resolveOperation(op);
+          return resolved.enabled && Boolean(resolved.requiredScope) && operationRegistersTool(kind, def);
+        }),
     );
   if (declaresScopes && !enforceScopes) {
     const reason = config.mcpTransport === 'stdio' ? 'stdio transport' : 'XSUAA not bound';
@@ -262,6 +275,8 @@ export async function start(options: StartOptions = {}): Promise<void> {
       'Backend access is governed by the destination credentials.',
     );
   }
+
+  const extrasContext: ExtrasContext = { clientsByApi, apiConfig, config, scopeOptions };
 
   // ── 3. Session factory ──────────────────────────────────────────────────────
   //
@@ -282,7 +297,7 @@ export async function start(options: StartOptions = {}): Promise<void> {
         apiDef.entitySets,
         config.enabledApiCategories,
         discoverySetup?.pinnedSet,
-        { enforceScopes },
+        scopeOptions,
       );
     }
 
@@ -292,12 +307,13 @@ export async function start(options: StartOptions = {}): Promise<void> {
         index: discoverySetup.index,
         pinned: discoverySetup.pinned,
         enforceScopes,
+        xsappname: scopeOptions.xsappname,
       });
     }
 
     registerApiDocResources(server, allEntitySets, apiConfig.server.name, config.enabledApiCategories);
 
-    registerUiTools?.(server, { views: uiViews, clientsByApi, baseDir: apiConfigDir });
+    registerUiTools?.(server, { views: uiViews, clientsByApi, baseDir: apiConfigDir, scopeOptions });
 
     options.registerExtras?.(server, extrasContext);
 

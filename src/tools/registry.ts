@@ -129,6 +129,34 @@ function formatKeyHint(keys: KeyProperty[]): string {
 }
 
 /**
+ * Normalise the JWT `scope` claim to an array of scope strings. XSUAA issues
+ * `scope` as a JSON array, but the OAuth 2.0 `scope` claim is defined as a
+ * space-separated string and some issuers emit it that way; reading it as an
+ * array only (`.some(...)`) would throw on a string claim and reject an
+ * otherwise valid token (F18). A missing/other-typed claim is no scopes.
+ */
+function normalizeScopeClaim(scope: unknown): string[] {
+  if (Array.isArray(scope)) return scope.filter((s): s is string => typeof s === 'string');
+  if (typeof scope === 'string') return scope.split(/\s+/).filter(Boolean);
+  return [];
+}
+
+/**
+ * Options for {@link checkScope}.
+ */
+export interface CheckScopeOptions {
+  /**
+   * The bound XSUAA application name (`xsappname`, e.g. `ci-mcp-server!t42`).
+   * When set, `requiredScope` is matched against the fully-qualified
+   * `${xsappname}.${requiredScope}` the token carries — exactly, not by a
+   * suffix — so a foreign app's `.<scope>` or an XSUAA built-in such as
+   * `uaa.user` no longer satisfies a bare `<scope>` (F18). An already-qualified
+   * `requiredScope` (one containing a `.`) is compared verbatim.
+   */
+  xsappname?: string;
+}
+
+/**
  * Verify that the user JWT contains the required scope.
  * Throws an error if the scope is missing or the token is invalid.
  *
@@ -137,7 +165,11 @@ function formatKeyHint(keys: KeyProperty[]): string {
  * reimplementing them — a second copy would be a security bug waiting to
  * drift.
  */
-export function checkScope(requiredScope: string | undefined, jwt: string | undefined): void {
+export function checkScope(
+  requiredScope: string | undefined,
+  jwt: string | undefined,
+  options: CheckScopeOptions = {},
+): void {
   if (!requiredScope) return; // no restriction defined, allow all
 
   if (!jwt) {
@@ -148,12 +180,25 @@ export function checkScope(requiredScope: string | undefined, jwt: string | unde
     const payload = JSON.parse(
       Buffer.from(jwt.split('.')[1], 'base64url').toString('utf-8')
     );
-    const scopes: string[] = payload.scope ?? [];
+    const scopes = normalizeScopeClaim(payload.scope);
 
-    // Accept both "appname.scopename" (XSUAA format) and bare "scopename"
-    const hasScope =
-      scopes.some((s) => s === requiredScope) ||
-      scopes.some((s) => s.endsWith(`.${requiredScope}`));
+    let hasScope: boolean;
+    if (options.xsappname) {
+      // XSUAA qualifies every scope with the issuing app's xsappname. Compare
+      // against our own `${xsappname}.${scope}` so another app's `.read` or a
+      // built-in like `uaa.user` cannot satisfy the requirement. An already
+      // qualified requiredScope (contains `.`) is matched verbatim.
+      const qualified = requiredScope.includes('.')
+        ? requiredScope
+        : `${options.xsappname}.${requiredScope}`;
+      hasScope = scopes.includes(qualified);
+    } else {
+      // No bound xsappname (local / stdio, where scopes are not enforced):
+      // accept both "appname.scopename" and bare "scopename".
+      hasScope =
+        scopes.includes(requiredScope) ||
+        scopes.some((s) => s.endsWith(`.${requiredScope}`));
+    }
 
     if (!hasScope) {
       throw new Error(`Forbidden: operation requires scope '${requiredScope}'`);
@@ -179,6 +224,15 @@ export interface ScopeOptions {
    * programmatic callers keep the secure behaviour unless they opt out.
    */
   enforceScopes?: boolean;
+  /**
+   * The bound XSUAA application name (`xsappname`), threaded to
+   * {@link checkScope} so a `requiredScope` is matched against the
+   * fully-qualified `${xsappname}.${requiredScope}` rather than any token scope
+   * ending in `.${requiredScope}` (F18). Set by the HTTP transport from the
+   * bound XSUAA credentials; absent over stdio / unauthenticated HTTP, where
+   * scopes are not enforced anyway.
+   */
+  xsappname?: string;
 }
 
 /**
@@ -192,7 +246,7 @@ export function authorize(
   options: ScopeOptions = {},
 ): void {
   if (options.enforceScopes === false) return;
-  checkScope(requiredScope, jwt);
+  checkScope(requiredScope, jwt, { xsappname: options.xsappname });
 }
 
 /**
@@ -228,6 +282,30 @@ function authorizeAnyOf(
     );
   }
   throw firstError;
+}
+
+/**
+ * CRUD operations whose tool is only registered on a keyed entity set. `get`
+ * and `delete` address a single entity, so a keyless set registers neither;
+ * `list`/`create`/`update` register regardless (a keyless update is a valid
+ * collection-level update).
+ */
+const KEY_GATED_OPERATIONS = new Set<keyof EntityOperations>(['get', 'delete']);
+
+/**
+ * Whether an entity-set operation actually registers a tool. Mirrors the
+ * key-gating in {@link registerEntityTools} (`get`/`delete` need a keyed entity
+ * set) so callers can reason about which operations produce a tool without
+ * duplicating the predicate. The startup scope-enforcement warning uses it so a
+ * scoped `get`/`delete` on a keyless set — which registers no tool — does not
+ * trigger a false "requiredScope is not enforced" warning (F14).
+ */
+export function operationRegistersTool(
+  operation: keyof EntityOperations,
+  definition: Pick<EntitySetDefinition, 'keys'>,
+): boolean {
+  if (KEY_GATED_OPERATIONS.has(operation)) return definition.keys.length > 0;
+  return true;
 }
 
 /**

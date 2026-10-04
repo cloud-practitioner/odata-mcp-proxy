@@ -33,6 +33,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 const rootDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 const configPath = join(rootDir, 'test', 'fixtures', 'e2e-scopes-config.json');
 const unregisteredScopesConfigPath = join(rootDir, 'test', 'fixtures', 'e2e-scopes-unregistered-config.json');
+const keylessScopesConfigPath = join(rootDir, 'test', 'fixtures', 'e2e-scopes-keyless-config.json');
 const serverEntry = join(rootDir, 'dist', 'index.js');
 
 const PACKAGES = { d: { results: [{ Id: 'Pkg_A', Name: 'Package A' }] } };
@@ -231,6 +232,46 @@ test('stdio: scopes only on disabled operations or filtered-out entity sets do n
 
     assert.match(stderr, /Tool registration complete/, 'info logs must reach stderr');
     assert.doesNotMatch(stderr, /requiredScope is not enforced/);
+  } finally {
+    await client.close();
+  }
+});
+
+test('stdio: a scoped get/delete on a keyless entity set does not warn (F14)', async () => {
+  // ServiceEndpoints has no keys, so its scoped `get`/`delete` register no
+  // tool — only `ServiceEndpoints_list` does. The startup warning must count
+  // only operations that produce a tool, so it must stay silent here even
+  // though the config declares `requiredScope` on get and delete.
+  assert.ok(existsSync(serverEntry), 'dist/index.js missing — run `npm run build` first');
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [serverEntry],
+    cwd: rootDir,
+    env: serverEnv({
+      MCP_TRANSPORT: 'stdio',
+      LOG_LEVEL: 'info',
+      API_CONFIG_FILE: keylessScopesConfigPath,
+    }),
+    stderr: 'pipe',
+  });
+  let stderr = '';
+  transport.stderr?.on('data', (chunk: Buffer) => { stderr += chunk.toString('utf8'); });
+  const client = new Client({ name: 'e2e-scopes-keyless', version: '0.0.0' });
+  await client.connect(transport);
+
+  try {
+    const { tools } = await client.listTools();
+    assert.deepEqual(
+      tools.map((t) => t.name).sort(),
+      ['ServiceEndpoints_list'],
+      'get/delete on a keyless entity set register no tool',
+    );
+    assert.match(stderr, /Tool registration complete/, 'info logs must reach stderr');
+    assert.doesNotMatch(
+      stderr,
+      /requiredScope is not enforced/,
+      'a scoped get/delete that registers no tool must not trigger the warning (F14)',
+    );
   } finally {
     await client.close();
   }

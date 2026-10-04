@@ -273,6 +273,12 @@ export interface DiscoveryOptions {
   pinned: string[];
   /** Whether `requiredScope` is checked against the caller JWT (default true). */
   enforceScopes?: boolean;
+  /**
+   * The bound XSUAA `xsappname`, threaded to the scope check so a
+   * `requiredScope` is matched against the full `${xsappname}.${scope}` the
+   * token carries (F18). Absent over stdio / unauthenticated HTTP.
+   */
+  xsappname?: string;
 }
 
 /**
@@ -280,7 +286,7 @@ export interface DiscoveryOptions {
  * Discovery" section for the public registration contract.
  */
 export function registerDiscoveryTools(server: McpServer, options: DiscoveryOptions): void {
-  const { discovery, index, pinned, enforceScopes } = options;
+  const { discovery, index, pinned, enforceScopes, xsappname } = options;
   const maxResults = discovery.maxResults ?? DEFAULT_MAX_RESULTS;
   const maxFullResults = discovery.maxFullResults ?? DEFAULT_MAX_FULL_RESULTS;
 
@@ -431,7 +437,7 @@ export function registerDiscoveryTools(server: McpServer, options: DiscoveryOpti
       // Same scope enforcement as the generated per-entity tools.
       const resolved = resolveOperation(entry.definition.operations[operation]);
       try {
-        authorize(resolved.requiredScope, extra.authInfo?.token, { enforceScopes });
+        authorize(resolved.requiredScope, extra.authInfo?.token, { enforceScopes, xsappname });
       } catch (error) {
         return formatToolError(error instanceof Error ? error.message : String(error));
       }

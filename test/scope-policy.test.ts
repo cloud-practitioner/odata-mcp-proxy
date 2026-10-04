@@ -10,7 +10,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { createMcpServer } from '../src/server/mcp-server.js';
-import { authorize, registerAllTools, type EntitySetDefinition } from '../src/tools/registry.js';
+import { authorize, checkScope, registerAllTools, type EntitySetDefinition } from '../src/tools/registry.js';
 import { buildIndex, registerDiscoveryTools } from '../src/tools/discovery.js';
 import type { ODataClient } from '../src/client/odata-client.js';
 
@@ -43,6 +43,46 @@ function jwtWith(scopes: string[]): string {
   const part = (o: unknown) => Buffer.from(JSON.stringify(o)).toString('base64url');
   return `${part({ alg: 'none' })}.${part({ scope: scopes })}.sig`;
 }
+
+/** An unsigned JWT with an arbitrary payload (to exercise non-array scope claims). */
+function jwtWithPayload(payload: Record<string, unknown>): string {
+  const part = (o: unknown) => Buffer.from(JSON.stringify(o)).toString('base64url');
+  return `${part({ alg: 'none' })}.${part(payload)}.sig`;
+}
+
+// ─── F18: scope matching ──────────────────────────────────────────────────────
+
+test('checkScope with xsappname matches only the app-qualified scope (F18)', () => {
+  const app = 'ci-mcp-server!t42';
+  // A foreign app's `.read` must not satisfy our `read`.
+  assert.throws(
+    () => checkScope('read', jwtWith(['some-other-app!t99.read']), { xsappname: app }),
+    /Forbidden: operation requires scope 'read'/,
+  );
+  // A built-in like `uaa.user` must not satisfy a bare `user` via suffix match.
+  assert.throws(
+    () => checkScope('user', jwtWith(['openid', 'uaa.user']), { xsappname: app }),
+    /Forbidden: operation requires scope 'user'/,
+  );
+  // Our own qualified scope is accepted.
+  assert.doesNotThrow(() => checkScope('read', jwtWith([`${app}.read`]), { xsappname: app }));
+  // An already-qualified requiredScope is compared verbatim.
+  assert.doesNotThrow(() => checkScope('uaa.user', jwtWith(['uaa.user']), { xsappname: app }));
+});
+
+test('checkScope handles a space-separated string scope claim (F18)', () => {
+  const app = 'ci-mcp-server!t42';
+  // A non-array `scope` claim must not throw "invalid token"; it is split on spaces.
+  assert.doesNotThrow(() =>
+    checkScope('read', jwtWithPayload({ scope: `openid ${app}.read` }), { xsappname: app }),
+  );
+  assert.throws(
+    () => checkScope('write', jwtWithPayload({ scope: `openid ${app}.read` }), { xsappname: app }),
+    /Forbidden: operation requires scope 'write'/,
+  );
+  // Without xsappname (local/stdio), the string claim is still parsed (suffix match).
+  assert.doesNotThrow(() => checkScope('read', jwtWithPayload({ scope: 'app.read' })));
+});
 
 /**
  * Connect a client to a server set up by `register`. With `token`, every

@@ -31,6 +31,12 @@ function fakeClient(execute: (...args: unknown[]) => Promise<unknown>): ODataCli
   return { execute } as unknown as ODataClient;
 }
 
+/** An unsigned JWT carrying the given scopes; the scope check only decodes the payload. */
+function jwtWith(scopes: string[]): string {
+  const part = (o: unknown) => Buffer.from(JSON.stringify(o)).toString('base64url');
+  return `${part({ alg: 'none' })}.${part({ scope: scopes })}.sig`;
+}
+
 beforeEach(() => clearTemplateCache());
 
 test('buildInputSchema compiles types, required and descriptions', () => {
@@ -224,4 +230,49 @@ test('registerUiTools fails fast when a view references an unknown api', () => {
     () => registerUiTools(server, { views: [helloView], clientsByApi: {}, baseDir: fixturesDir }),
     /references unknown api "x"/,
   );
+});
+
+// ─── F13: a view's requiredScope gates the fetch ──────────────────────────────
+
+const scopedView: UiViewDefinition = {
+  ...helloView,
+  tool: 'UI_Creds',
+  requiredScope: 'admin',
+  data: { creds: { api: 'x', path: 'UserCredentials' } },
+};
+
+test('UI handler enforces requiredScope before fetching (F13)', async () => {
+  const calls: string[] = [];
+  const client = fakeClient(async (method, path) => {
+    calls.push(`${method} ${path}`);
+    return { value: [{ Name: 'secret' }] };
+  });
+  const handler = createUiToolHandler(scopedView, { x: client }, fixturesDir, {
+    enforceScopes: true,
+    xsappname: 'ci-mcp-server!t42',
+  });
+
+  // A read-only token lacking `admin` is refused — and no data is fetched.
+  const denied = await handler({ who: 'x' }, { authInfo: { token: jwtWith(['ci-mcp-server!t42.read']) } });
+  assert.equal(denied.isError, true);
+  assert.match(denied.content[0].text as string, /Forbidden: operation requires scope 'admin'/);
+  assert.deepEqual(calls, [], 'the scope check must precede the backend fetch');
+
+  // An admin-scoped caller is allowed through to the (admin-scoped) data.
+  const allowed = await handler({ who: 'x' }, { authInfo: { token: jwtWith(['ci-mcp-server!t42.admin']) } });
+  assert.ok(!allowed.isError, allowed.content[0].text as string);
+  assert.deepEqual(calls, ['GET UserCredentials']);
+});
+
+test('UI handler does not enforce requiredScope when scopes are off (local/stdio)', async () => {
+  const calls: string[] = [];
+  const client = fakeClient(async (method, path) => {
+    calls.push(`${method} ${path}`);
+    return { value: [] };
+  });
+  // enforceScopes: false (no caller token exists) — the view renders as before.
+  const handler = createUiToolHandler(scopedView, { x: client }, fixturesDir, { enforceScopes: false });
+  const result = await handler({ who: 'x' });
+  assert.ok(!result.isError, result.content[0].text as string);
+  assert.deepEqual(calls, ['GET UserCredentials']);
 });
