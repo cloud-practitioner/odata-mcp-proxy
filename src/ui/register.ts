@@ -143,10 +143,9 @@ function buildUiResource(view: UiViewDefinition, html: string) {
 /**
  * Build the tool handler for one UI view. Exported for unit testing.
  *
- * A view may declare an optional `requiredScope`; the handler enforces it
- * through {@link authorize} (same policy as the generated entity tools) before
- * any data source is fetched, so a token lacking the scope never reaches the
- * backend (F13).
+ * A view's optional `requiredScope` goes through {@link authorize} before any
+ * data source is fetched. When enforcement is enabled, a caller lacking that
+ * scope must never reach the backend.
  */
 export function createUiToolHandler(
   view: UiViewDefinition,

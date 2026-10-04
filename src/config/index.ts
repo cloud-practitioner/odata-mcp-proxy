@@ -233,11 +233,8 @@ export interface UiViewDefinition {
   /** HTML template file path, relative to the API config file. */
   template: string;
   /**
-   * Optional scope the caller's JWT must carry to render this view, enforced
-   * exactly as a generated tool's `requiredScope` (and, like it, only when an
-   * XSUAA-authenticated caller is present). A view fetches data through the
-   * shared clients, so an admin-scoped source must be gated here as well as on
-   * its entity tool.
+   * Optional app-local scope for the view's tool. See the README's
+   * "Operation Scopes" section for enforcement and data-source restrictions.
    */
   requiredScope?: string;
   /** Tool input parameters (compiled to a Zod schema). */

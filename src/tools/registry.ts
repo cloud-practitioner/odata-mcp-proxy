@@ -154,8 +154,10 @@ export interface CheckScopeOptions {
 }
 
 /**
- * Verify that the user JWT contains the required scope.
- * Throws an error if the scope is missing or the token is invalid.
+ * Check the required scope in a JWT already authenticated by the transport.
+ * This only decodes the payload; it does not verify signature, issuer,
+ * audience, or expiry. Throws for missing application context, a missing
+ * required scope, or an unreadable token payload.
  *
  * Tool handlers call this through {@link authorize}, which applies the
  * enforcement policy; the discovery executor shares both rather than
