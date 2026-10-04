@@ -32,7 +32,7 @@ function fakeClient(execute: (...args: unknown[]) => Promise<unknown>): ODataCli
 }
 
 /** An unsigned JWT carrying the given scopes; the scope check only decodes the payload. */
-function jwtWith(scopes: string[]): string {
+function jwtWith(scopes: string[] | string): string {
   const part = (o: unknown) => Buffer.from(JSON.stringify(o)).toString('base64url');
   return `${part({ alg: 'none' })}.${part({ scope: scopes })}.sig`;
 }
@@ -134,7 +134,7 @@ test('summarizeUiResult counts paginated entries and flags truncation', () => {
 
 test('handler returns text summary + ui resource + structuredContent payload', async () => {
   const client = fakeClient(async () => ({ value: [{ id: 1 }, { id: 2 }] }));
-  const handler = createUiToolHandler(helloView, { x: client }, fixturesDir);
+  const handler = createUiToolHandler(helloView, { x: client }, fixturesDir, { xsappname: 'app!t1' });
 
   const result = await handler({ who: 'Wo<rld' }, { authInfo: { token: 'jwt' } });
 
@@ -166,7 +166,7 @@ test('handler returns isError when a required data entry fails', async () => {
   const client = fakeClient(async () => {
     throw new Error('boom');
   });
-  const handler = createUiToolHandler(helloView, { x: client }, fixturesDir);
+  const handler = createUiToolHandler(helloView, { x: client }, fixturesDir, { xsappname: 'app!t1' });
 
   const result = await handler({ who: 'x' });
 
@@ -186,7 +186,7 @@ test('handler renders optional-failure entries as null', async () => {
     if (path === 'extra') throw new Error('nope');
     return [1];
   });
-  const handler = createUiToolHandler(view, { x: client }, fixturesDir);
+  const handler = createUiToolHandler(view, { x: client }, fixturesDir, { xsappname: 'app!t1' });
 
   const result = await handler({ who: 'x' });
   assert.ok(!result.isError);
@@ -207,7 +207,9 @@ test('registerUiTools registers tool with _meta/readOnlyHint and the template re
   } as unknown as McpServer;
 
   const client = fakeClient(async () => []);
-  registerUiTools(server, { views: [helloView], clientsByApi: { x: client }, baseDir: fixturesDir });
+  registerUiTools(server, {
+    views: [helloView], clientsByApi: { x: client }, baseDir: fixturesDir, scopeOptions: { xsappname: 'app!t1' },
+  });
 
   assert.equal(tools.length, 1);
   assert.equal(tools[0].name, 'UI_Hello');
@@ -227,7 +229,9 @@ test('registerUiTools registers tool with _meta/readOnlyHint and the template re
 test('registerUiTools fails fast when a view references an unknown api', () => {
   const server = { registerTool: () => {}, registerResource: () => {} } as unknown as McpServer;
   assert.throws(
-    () => registerUiTools(server, { views: [helloView], clientsByApi: {}, baseDir: fixturesDir }),
+    () => registerUiTools(server, {
+      views: [helloView], clientsByApi: {}, baseDir: fixturesDir, scopeOptions: { xsappname: 'app!t1' },
+    }),
     /references unknown api "x"/,
   );
 });
@@ -240,6 +244,65 @@ const scopedView: UiViewDefinition = {
   requiredScope: 'admin',
   data: { creds: { api: 'x', path: 'UserCredentials' } },
 };
+
+test('UI registration and handler creation reject missing application context', () => {
+  let registrations = 0;
+  const server = {
+    registerTool: () => { registrations++; },
+    registerResource: () => { registrations++; },
+  } as unknown as McpServer;
+  const client = fakeClient(async () => []);
+  for (const scopeOptions of [{}, { enforceScopes: true }, { xsappname: '' }, { xsappname: '  ' }]) {
+    for (const view of [helloView, scopedView]) {
+      assert.throws(() => createUiToolHandler(view, { x: client }, fixturesDir, scopeOptions),
+        /Scope enforcement requires a non-empty xsappname/);
+      assert.throws(() => registerUiTools(server, {
+        views: [view], clientsByApi: { x: client }, baseDir: fixturesDir, scopeOptions,
+      }), /Scope enforcement requires a non-empty xsappname/);
+    }
+    assert.throws(() => registerUiTools(server, {
+      views: [], clientsByApi: {}, baseDir: fixturesDir, scopeOptions,
+    }), /Scope enforcement requires a non-empty xsappname/);
+  }
+  assert.equal(registrations, 0);
+});
+
+test('registered UI handlers share exact app-local matching for array and string claims', async () => {
+  type Handler = ReturnType<typeof createUiToolHandler>;
+  const handlers = new Map<string, Handler>();
+  const server = {
+    registerTool: (name: string, _config: unknown, handler: Handler) => { handlers.set(name, handler); },
+    registerResource: () => {},
+  } as unknown as McpServer;
+  const calls: string[] = [];
+  const client = fakeClient(async (method, path) => {
+    calls.push(`${method} ${path}`);
+    return { value: [] };
+  });
+  registerUiTools(server, {
+    views: ['admin', 'user', 'orders.read'].map((requiredScope) => ({
+      ...scopedView, tool: `UI_${requiredScope}`, requiredScope,
+    })),
+    clientsByApi: { x: client }, baseDir: fixturesDir, scopeOptions: { xsappname: 'app!t1' },
+  });
+  for (const requiredScope of ['admin', 'user', 'orders.read']) {
+    const handler = handlers.get(`UI_${requiredScope}`)!;
+    for (const stringClaim of [false, true]) {
+      for (const [scope, allowed] of [
+        [`foreign-app.${requiredScope}`, false],
+        [requiredScope === 'user' ? 'uaa.user' : requiredScope, false],
+        [`app!t1.${requiredScope}`, true],
+      ] as const) {
+        calls.length = 0;
+        const token = jwtWith(stringClaim ? `openid ${scope}` : ['openid', scope]);
+        const result = await handler({ who: 'x' }, { authInfo: { token } });
+        assert.equal(!result.isError, allowed, result.content[0].text as string);
+        assert.deepEqual(calls, allowed ? ['GET UserCredentials'] : []);
+        if (!allowed) assert.match(result.content[0].text as string, /Forbidden/);
+      }
+    }
+  }
+});
 
 test('UI handler enforces requiredScope before fetching (F13)', async () => {
   const calls: string[] = [];

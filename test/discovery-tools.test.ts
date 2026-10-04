@@ -57,12 +57,13 @@ async function connect(opts: { mode: 'search' | 'hybrid'; pinned?: string[]; cal
 
   const server = createMcpServer('test', '1.0.0');
   for (const api of apis) {
-    registerAllTools(server, api.client, api.entitySets, ['all'], pinnedSet);
+    registerAllTools(server, api.client, api.entitySets, ['all'], pinnedSet, { xsappname: 'app' });
   }
   registerDiscoveryTools(server, {
     discovery: { mode: opts.mode, alwaysRegister: opts.pinned },
     index,
     pinned: [...pinnedSet],
+    xsappname: 'app',
   });
 
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -264,7 +265,7 @@ test('a keyless entity set accepts a collection-level update with no path', asyn
   const client = fakeClient(calls);
   const apis = [{ name: 'cis-entitlements', client, entitySets: [ASSIGNMENTS] }];
   const server = createMcpServer('t', '1');
-  registerDiscoveryTools(server, { discovery: { mode: 'search' }, index: buildIndex(apis, ['all']), pinned: [] });
+  registerDiscoveryTools(server, { discovery: { mode: 'search' }, index: buildIndex(apis, ['all']), pinned: [], xsappname: 'app' });
   const [ct, st] = InMemoryTransport.createLinkedPair();
   const mcp = new Client({ name: 'c', version: '1' });
   await Promise.all([mcp.connect(ct), server.connect(st)]);
@@ -332,6 +333,7 @@ test('backend errors surface as isError, not a throw', async () => {
     discovery: { mode: 'search' },
     index: buildIndex(apis, ['all']),
     pinned: [],
+    xsappname: 'app',
   });
   const [ct, st] = InMemoryTransport.createLinkedPair();
   const mcp = new Client({ name: 'c', version: '1' });

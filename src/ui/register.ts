@@ -21,7 +21,7 @@ import type { ODataClient } from '../client/odata-client.js';
 import type { UiViewDefinition } from '../config/index.js';
 import { fetchUiData } from './data.js';
 import { assembleTemplate, injectData } from './templates.js';
-import { authorize, type ScopeOptions } from '../tools/registry.js';
+import { authorize, validateScopeOptions, type ScopeOptions } from '../tools/registry.js';
 import { logger } from '../utils/logger.js';
 
 const DEFAULT_FRAME_SIZE: [string, string] = ['100%', '760px'];
@@ -35,8 +35,8 @@ export interface UiRegistrationOptions {
   baseDir: string;
   /**
    * Scope-enforcement policy, applied to each view's optional `requiredScope`
-   * exactly as the generated entity tools apply theirs. Omit to keep the
-   * secure default (enforce when a caller token is present).
+   * exactly as the generated entity tools apply theirs. Enforcement defaults
+   * to true and requires `xsappname`; use `enforceScopes: false` to opt out.
    */
   scopeOptions?: ScopeOptions;
 }
@@ -154,6 +154,7 @@ export function createUiToolHandler(
   baseDir: string,
   scopeOptions: ScopeOptions = {},
 ): (args: Record<string, unknown> | undefined, extra?: { authInfo?: { token?: string } }) => Promise<CallToolResult> {
+  validateScopeOptions(scopeOptions);
   return async (args, extra) => {
     try {
       authorize(view.requiredScope, extra?.authInfo?.token, scopeOptions);
@@ -192,6 +193,7 @@ export function createUiToolHandler(
  */
 export function registerUiTools(server: McpServer, options: UiRegistrationOptions): void {
   const { views, clientsByApi, baseDir, scopeOptions } = options;
+  validateScopeOptions(scopeOptions);
 
   for (const view of views) {
     for (const [name, source] of Object.entries(view.data ?? {})) {

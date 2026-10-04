@@ -223,8 +223,8 @@ async function connect(
 ) {
   const apis = definitions.map((api) => ({ ...api, client: fakeClient(calls, api.pathPrefix) }));
   const server = createMcpServer('t', '1');
-  for (const api of apis) registerAllTools(server, api.client, api.entitySets, ['all']);
-  registerDiscoveryTools(server, { discovery: { mode: 'hybrid' }, index: buildIndex(apis, ['all']), pinned: [] });
+  for (const api of apis) registerAllTools(server, api.client, api.entitySets, ['all'], undefined, { xsappname: 'app' });
+  registerDiscoveryTools(server, { discovery: { mode: 'hybrid' }, index: buildIndex(apis, ['all']), pinned: [], xsappname: 'app' });
   const [ct, st] = InMemoryTransport.createLinkedPair();
   const mcp = new Client({ name: 'c', version: '1' });
   await Promise.all([mcp.connect(ct), server.connect(st)]);

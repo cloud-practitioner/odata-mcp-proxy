@@ -20,6 +20,9 @@ test('the re-exported authorize applies the same scope policy (F24)', () => {
   const part = (o: unknown) => Buffer.from(JSON.stringify(o)).toString('base64url');
   const jwt = `${part({ alg: 'none' })}.${part({ scope: ['app!t1.read'] })}.sig`;
 
+  assert.throws(() => root.authorize('read', jwt), /Scope enforcement requires a non-empty xsappname/);
+  assert.throws(() => root.checkScope('read', jwt), /Scope enforcement requires a non-empty xsappname/);
+  assert.doesNotThrow(() => root.authorize('read', jwt, { xsappname: 'app!t1' }));
   // enforcing (default): a token lacking the scope is refused.
   assert.throws(() => root.authorize('write', jwt, { xsappname: 'app!t1' }),
     /Forbidden: operation requires scope 'write'/);

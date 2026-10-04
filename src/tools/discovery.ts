@@ -26,6 +26,7 @@ import {
   formatToolResult,
   formatToolError,
   authorize,
+  validateScopeOptions,
   type EntitySetDefinition,
   type KeyProperty,
 } from './registry.js';
@@ -276,7 +277,7 @@ export interface DiscoveryOptions {
   /**
    * The bound XSUAA `xsappname`, threaded to the scope check so a
    * `requiredScope` is matched against the full `${xsappname}.${scope}` the
-   * token carries (F18). Absent over stdio / unauthenticated HTTP.
+   * token carries. Required unless `enforceScopes` is false.
    */
   xsappname?: string;
 }
@@ -286,6 +287,7 @@ export interface DiscoveryOptions {
  * Discovery" section for the public registration contract.
  */
 export function registerDiscoveryTools(server: McpServer, options: DiscoveryOptions): void {
+  validateScopeOptions(options);
   const { discovery, index, pinned, enforceScopes, xsappname } = options;
   const maxResults = discovery.maxResults ?? DEFAULT_MAX_RESULTS;
   const maxFullResults = discovery.maxFullResults ?? DEFAULT_MAX_FULL_RESULTS;

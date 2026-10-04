@@ -147,11 +147,8 @@ function normalizeScopeClaim(scope: unknown): string[] {
 export interface CheckScopeOptions {
   /**
    * The bound XSUAA application name (`xsappname`, e.g. `ci-mcp-server!t42`).
-   * When set, `requiredScope` is matched against the fully-qualified
-   * `${xsappname}.${requiredScope}` the token carries — exactly, not by a
-   * suffix — so a foreign app's `.<scope>` or an XSUAA built-in such as
-   * `uaa.user` no longer satisfies a bare `<scope>` (F18). An already-qualified
-   * `requiredScope` (one containing a `.`) is compared verbatim.
+   * Required for checking scopes. Every `requiredScope`, including dotted
+   * names, is matched exactly against `${xsappname}.${requiredScope}`.
    */
   xsappname?: string;
 }
@@ -170,6 +167,7 @@ export function checkScope(
   jwt: string | undefined,
   options: CheckScopeOptions = {},
 ): void {
+  validateScopeOptions({ xsappname: options.xsappname });
   if (!requiredScope) return; // no restriction defined, allow all
 
   if (!jwt) {
@@ -182,25 +180,8 @@ export function checkScope(
     );
     const scopes = normalizeScopeClaim(payload.scope);
 
-    let hasScope: boolean;
-    if (options.xsappname) {
-      // XSUAA qualifies every scope with the issuing app's xsappname. Compare
-      // against our own `${xsappname}.${scope}` so another app's `.read` or a
-      // built-in like `uaa.user` cannot satisfy the requirement. An already
-      // qualified requiredScope (contains `.`) is matched verbatim.
-      const qualified = requiredScope.includes('.')
-        ? requiredScope
-        : `${options.xsappname}.${requiredScope}`;
-      hasScope = scopes.includes(qualified);
-    } else {
-      // No bound xsappname (local / stdio, where scopes are not enforced):
-      // accept both "appname.scopename" and bare "scopename".
-      hasScope =
-        scopes.includes(requiredScope) ||
-        scopes.some((s) => s.endsWith(`.${requiredScope}`));
-    }
-
-    if (!hasScope) {
+    const qualified = `${options.xsappname}.${requiredScope}`;
+    if (!scopes.includes(qualified)) {
       throw new Error(`Forbidden: operation requires scope '${requiredScope}'`);
     }
   } catch (error) {
@@ -225,14 +206,17 @@ export interface ScopeOptions {
    */
   enforceScopes?: boolean;
   /**
-   * The bound XSUAA application name (`xsappname`), threaded to
-   * {@link checkScope} so a `requiredScope` is matched against the
-   * fully-qualified `${xsappname}.${requiredScope}` rather than any token scope
-   * ending in `.${requiredScope}` (F18). Set by the HTTP transport from the
-   * bound XSUAA credentials; absent over stdio / unauthenticated HTTP, where
-   * scopes are not enforced anyway.
+   * The bound XSUAA application name (`xsappname`), required unless
+   * `enforceScopes` is false. Every scope is local to this application and
+   * matched exactly as `${xsappname}.${requiredScope}`.
    */
   xsappname?: string;
+}
+
+export function validateScopeOptions(options: ScopeOptions = {}): void {
+  if (options.enforceScopes !== false && !options.xsappname?.trim()) {
+    throw new Error('Scope enforcement requires a non-empty xsappname; provide the bound XSUAA application name or set enforceScopes: false');
+  }
 }
 
 /**
@@ -349,6 +333,7 @@ export function registerEntityTools(
   definition: EntitySetDefinition,
   scopeOptions: ScopeOptions = {},
 ): void {
+  validateScopeOptions(scopeOptions);
   const { entitySet, description, keys, operations, navigationProperties } = definition;
   const urlPath = definition.urlPath ?? entitySet;
   const navNames = (navigationProperties ?? []).map((n) => n.name);
@@ -490,6 +475,7 @@ export function registerAllTools(
   onlyEntitySets?: Set<string>,
   scopeOptions: ScopeOptions = {},
 ): void {
+  validateScopeOptions(scopeOptions);
   const isAll = enabledCategories.length === 1 && enabledCategories[0] === 'all';
 
   let registered = 0;

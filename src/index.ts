@@ -17,7 +17,7 @@ import { resolveDestination } from './client/destination-service.js';
 import { ODataClient } from './client/odata-client.js';
 import { createMcpServer } from './server/mcp-server.js';
 import { SessionStore } from './server/sessions.js';
-import { registerAllTools, findUnknownCategories, operationRegistersTool, type EntityOperations, type ScopeOptions } from './tools/registry.js';
+import { registerAllTools, findUnknownCategories, operationRegistersTool, validateScopeOptions, type EntityOperations, type ScopeOptions } from './tools/registry.js';
 import { registerApiDocResources } from './resources/index.js';
 
 // ─── Public API ──────────────────────────────────────────────────────────────
@@ -36,7 +36,7 @@ export interface ExtrasContext {
   /**
    * The resolved scope-enforcement policy the generated tools use. Extras
    * tools that gate on a `requiredScope` must pass this to {@link authorize}
-   * (or {@link checkScope}) so they apply the same policy — enforcing only when
+   * so they apply the same policy — enforcing only when
    * an XSUAA-authenticated caller is present, and qualifying scopes with the
    * bound `xsappname` — instead of silently bypassing it.
    */
@@ -231,6 +231,7 @@ export async function start(options: StartOptions = {}): Promise<void> {
     enforceScopes,
     xsappname: httpModule?.getXsuaaAppName(),
   };
+  validateScopeOptions(scopeOptions);
 
   // F5: On Cloud Foundry (VCAP_APPLICATION present) an HTTP server with no XSUAA
   // binding is publicly routable yet unauthenticated while holding the
