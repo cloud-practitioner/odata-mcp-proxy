@@ -199,6 +199,16 @@ export function mcpTransportSecurity(port: number): {
 }
 
 /**
+ * The bound XSUAA application name (`xsappname`), or `undefined` when no XSUAA
+ * service is bound. The entry point threads it into the scope policy so
+ * `requiredScope` is matched against the fully-qualified `${xsappname}.${scope}`
+ * the caller's token carries (F18), rather than any scope ending in `.${scope}`.
+ */
+export function getXsuaaAppName(): string | undefined {
+  return loadXsuaa()?.xsappname;
+}
+
+/**
  * Creates an Express application pre-configured with body parsing, CORS, request
  * logging, a health check, and — when an XSUAA service is bound — the MCP-native
  * OAuth proxy plus a bearer guard on `/mcp` (via `@arc-mcp/xsuaa-auth`).

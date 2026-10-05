@@ -232,6 +232,11 @@ export interface UiViewDefinition {
   uri: string;
   /** HTML template file path, relative to the API config file. */
   template: string;
+  /**
+   * Optional app-local scope for the view's tool. See the README's
+   * "Operation Scopes" section for enforcement and data-source restrictions.
+   */
+  requiredScope?: string;
   /** Tool input parameters (compiled to a Zod schema). */
   inputs?: Record<string, UiInputDefinition>;
   /** Named data sources fetched concurrently on tool invocation. */

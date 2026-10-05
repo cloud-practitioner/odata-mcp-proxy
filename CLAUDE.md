@@ -136,7 +136,7 @@ The file is validated against `src/config/api-config-schema.ts` at startup. The 
 
 The config may also contain an optional top-level `ui` array of interactive MCP-UI views (read-only tools that fetch declared data sources through the shared clients and return an HTML template with the JSON payload baked into the `"__DATA__"` token). See the README section "Interactive UI Views (mcp-ui)" for the schema. The `src/ui/` module and `@mcp-ui/server` load lazily, only when a config declares UI views.
 
-Programmatic consumers import `start(options?)` from the package root; `options.registerExtras(server, ctx)` runs in the per-session factory with `ctx = { clientsByApi, apiConfig, config }`. Deep `odata-mcp-proxy/dist/...` imports remain supported via the `exports` map.
+Programmatic consumers import `start(options?)` from the package root; `options.registerExtras(server, ctx)` runs in the per-session factory (see [README: Programmatic API](README.md#programmatic-api) for the context contract). Deep `odata-mcp-proxy/dist/...` imports remain supported via the `exports` map.
 
 #### Local development credentials
 

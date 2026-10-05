@@ -1,0 +1,28 @@
+{
+  "server": {
+    "name": "scopes-keyless-e2e",
+    "version": "0.0.1",
+    "description": "Stub config whose only scopes sit on get/delete of a keyless entity set, which register no tool (F14)"
+  },
+  "apis": [
+    {
+      "name": "cpi",
+      "destination": "E2E_SCOPES_DEST",
+      "pathPrefix": "/api/v1",
+      "entitySets": [
+        {
+          "entitySet": "ServiceEndpoints",
+          "description": "Service endpoints (no keys)",
+          "keys": [],
+          "operations": {
+            "list": true,
+            "get": { "enabled": true, "requiredScope": "admin" },
+            "create": false,
+            "update": false,
+            "delete": { "enabled": true, "requiredScope": "admin" }
+          }
+        }
+      ]
+    }
+  ]
+}

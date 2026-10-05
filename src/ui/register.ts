@@ -21,6 +21,7 @@ import type { ODataClient } from '../client/odata-client.js';
 import type { UiViewDefinition } from '../config/index.js';
 import { fetchUiData } from './data.js';
 import { assembleTemplate, injectData } from './templates.js';
+import { authorize, validateScopeOptions, type ScopeOptions } from '../tools/registry.js';
 import { logger } from '../utils/logger.js';
 
 const DEFAULT_FRAME_SIZE: [string, string] = ['100%', '760px'];
@@ -32,6 +33,12 @@ export interface UiRegistrationOptions {
   clientsByApi: Record<string, ODataClient>;
   /** Directory template/partial paths resolve against (the config file's directory). */
   baseDir: string;
+  /**
+   * Scope-enforcement policy, applied to each view's optional `requiredScope`
+   * exactly as the generated entity tools apply theirs. Enforcement defaults
+   * to true and requires `xsappname`; use `enforceScopes: false` to opt out.
+   */
+  scopeOptions?: ScopeOptions;
 }
 
 // ─── Schema & payload helpers ────────────────────────────────────────────────
@@ -135,14 +142,21 @@ function buildUiResource(view: UiViewDefinition, html: string) {
 
 /**
  * Build the tool handler for one UI view. Exported for unit testing.
+ *
+ * A view's optional `requiredScope` goes through {@link authorize} before any
+ * data source is fetched. When enforcement is enabled, a caller lacking that
+ * scope must never reach the backend.
  */
 export function createUiToolHandler(
   view: UiViewDefinition,
   clientsByApi: Record<string, ODataClient>,
   baseDir: string,
+  scopeOptions: ScopeOptions = {},
 ): (args: Record<string, unknown> | undefined, extra?: { authInfo?: { token?: string } }) => Promise<CallToolResult> {
+  validateScopeOptions(scopeOptions);
   return async (args, extra) => {
     try {
+      authorize(view.requiredScope, extra?.authInfo?.token, scopeOptions);
       const params = args ?? {};
       const data = await fetchUiData(view.data ?? {}, clientsByApi, params, extra?.authInfo?.token);
       const payload = { view: view.tool, params, data };
@@ -177,7 +191,8 @@ export function createUiToolHandler(
  *         so misconfiguration fails fast at startup instead of at call time.
  */
 export function registerUiTools(server: McpServer, options: UiRegistrationOptions): void {
-  const { views, clientsByApi, baseDir } = options;
+  const { views, clientsByApi, baseDir, scopeOptions } = options;
+  validateScopeOptions(scopeOptions);
 
   for (const view of views) {
     for (const [name, source] of Object.entries(view.data ?? {})) {
@@ -197,7 +212,7 @@ export function registerUiTools(server: McpServer, options: UiRegistrationOption
         annotations: { readOnlyHint: true },
         _meta: { [RESOURCE_URI_META_KEY]: view.uri },
       },
-      createUiToolHandler(view, clientsByApi, baseDir),
+      createUiToolHandler(view, clientsByApi, baseDir, scopeOptions),
     );
 
     // Template resource (no baked data): MCP Apps hosts fetch this once and

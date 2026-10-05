@@ -10,7 +10,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { createMcpServer } from '../src/server/mcp-server.js';
-import { authorize, registerAllTools, type EntitySetDefinition } from '../src/tools/registry.js';
+import { authorize, checkScope, registerAllTools, registerEntityTools, type EntitySetDefinition } from '../src/tools/registry.js';
 import { buildIndex, registerDiscoveryTools } from '../src/tools/discovery.js';
 import type { ODataClient } from '../src/client/odata-client.js';
 
@@ -39,10 +39,67 @@ function fakeClient(calls: string[]): ODataClient {
 }
 
 /** An unsigned JWT carrying the given scopes; checkScope only decodes the payload. */
-function jwtWith(scopes: string[]): string {
+function jwtWith(scopes: string[] | string): string {
   const part = (o: unknown) => Buffer.from(JSON.stringify(o)).toString('base64url');
   return `${part({ alg: 'none' })}.${part({ scope: scopes })}.sig`;
 }
+
+/** An unsigned JWT with an arbitrary payload (to exercise non-array scope claims). */
+function jwtWithPayload(payload: Record<string, unknown>): string {
+  const part = (o: unknown) => Buffer.from(JSON.stringify(o)).toString('base64url');
+  return `${part({ alg: 'none' })}.${part(payload)}.sig`;
+}
+
+// ─── F18: scope matching ──────────────────────────────────────────────────────
+
+test('checkScope with xsappname matches only the app-qualified scope (F18)', () => {
+  const app = 'ci-mcp-server!t42';
+  // A foreign app's `.read` must not satisfy our `read`.
+  assert.throws(
+    () => checkScope('read', jwtWith(['some-other-app!t99.read']), { xsappname: app }),
+    /Forbidden: operation requires scope 'read'/,
+  );
+  // A built-in like `uaa.user` must not satisfy a bare `user` via suffix match.
+  assert.throws(
+    () => checkScope('user', jwtWith(['openid', 'uaa.user']), { xsappname: app }),
+    /Forbidden: operation requires scope 'user'/,
+  );
+  // Our own qualified scope is accepted.
+  assert.doesNotThrow(() => checkScope('read', jwtWith([`${app}.read`]), { xsappname: app }));
+  assert.throws(() => checkScope('admin', jwtWith(['foreign-app.admin']), { xsappname: app }), /Forbidden/);
+  assert.throws(() => checkScope('admin', jwtWith(['admin']), { xsappname: app }), /Forbidden/);
+  assert.throws(() => checkScope('uaa.user', jwtWith(['uaa.user']), { xsappname: app }), /Forbidden/);
+  assert.doesNotThrow(() => checkScope('uaa.user', jwtWith([`${app}.uaa.user`]), { xsappname: app }));
+});
+
+test('checkScope qualifies dotted local scope names for array and string claims', () => {
+  for (const scope of [['app!t1.orders.read'], 'openid app!t1.orders.read']) {
+    assert.doesNotThrow(() => checkScope('orders.read', jwtWith(scope), { xsappname: 'app!t1' }));
+  }
+  for (const scope of [['orders.read'], 'orders.read', ['foreign-app.orders.read']]) {
+    assert.throws(() => checkScope('orders.read', jwtWith(scope), { xsappname: 'app!t1' }), /Forbidden/);
+  }
+});
+
+test('checkScope handles a space-separated string scope claim (F18)', () => {
+  const app = 'ci-mcp-server!t42';
+  // A non-array `scope` claim must not throw "invalid token"; it is split on spaces.
+  assert.doesNotThrow(() =>
+    checkScope('read', jwtWithPayload({ scope: `openid ${app}.read` }), { xsappname: app }),
+  );
+  assert.throws(
+    () => checkScope('write', jwtWithPayload({ scope: `openid ${app}.read` }), { xsappname: app }),
+    /Forbidden: operation requires scope 'write'/,
+  );
+  assert.throws(
+    () => checkScope('admin', jwtWithPayload({ scope: 'foreign-app.admin' }), { xsappname: app }),
+    /Forbidden/,
+  );
+  assert.throws(
+    () => checkScope('user', jwtWithPayload({ scope: 'openid uaa.user' }), { xsappname: app }),
+    /Forbidden/,
+  );
+});
 
 /**
  * Connect a client to a server set up by `register`. With `token`, every
@@ -65,10 +122,38 @@ async function connect(register: (server: McpServer) => void, token?: string) {
 
 type Result = { isError?: boolean; content: Array<{ type: string; text?: string }> };
 
-test('registerAllTools without scope options still rejects a tokenless scoped call', async () => {
+test('enforcing entry points reject missing application context', async () => {
+  const calls: string[] = [];
+  const client = fakeClient(calls);
+  const index = buildIndex([{ name: 'cpi', client, entitySets: [PACKAGES] }], ['all']);
+  const { mcp, server } = await connect((s) => {
+    for (const options of [{}, { enforceScopes: true }, { xsappname: '' }, { xsappname: '  ' }]) {
+      for (const [scope, token] of [
+        ['admin', jwtWith(['foreign-app.admin'])],
+        ['user', jwtWith(['uaa.user'])],
+        [undefined, undefined],
+      ] as const) {
+        assert.throws(() => checkScope(scope, token, options), /Scope enforcement requires a non-empty xsappname/);
+        assert.throws(() => authorize(scope, token, options), /Scope enforcement requires a non-empty xsappname/);
+      }
+      assert.throws(() => registerEntityTools(s, client, PACKAGES, options), /Scope enforcement requires a non-empty xsappname/);
+      for (const definitions of [[PACKAGES], []]) {
+        assert.throws(() => registerAllTools(s, client, definitions, ['all'], undefined, options), /Scope enforcement requires a non-empty xsappname/);
+      }
+      assert.throws(() => registerDiscoveryTools(s, {
+        discovery: { mode: 'search' }, index, pinned: [], ...options,
+      }), /Scope enforcement requires a non-empty xsappname/);
+    }
+  });
+  await assert.rejects(() => mcp.listTools(), { code: -32601 });
+  assert.deepEqual(calls, []);
+  await server.close();
+});
+
+test('registerAllTools with application context rejects a tokenless scoped call', async () => {
   const calls: string[] = [];
   const { mcp, server } = await connect((s) =>
-    registerAllTools(s, fakeClient(calls), [PACKAGES], ['all']));
+    registerAllTools(s, fakeClient(calls), [PACKAGES], ['all'], undefined, { xsappname: 'app' }));
 
   const list = await mcp.callTool({ name: 'IntegrationPackages_list', arguments: {} }) as Result;
   assert.equal(list.isError, true);
@@ -107,12 +192,16 @@ test('enforceScopes: false lets tokenless scoped calls reach the backend', async
 });
 
 test('authorize enforces by default and checks the token scopes', () => {
-  assert.throws(() => authorize('read', jwtWith(['app.write'])), /Forbidden: operation requires scope 'read'/);
-  assert.doesNotThrow(() => authorize('read', jwtWith(['app.read'])));
-  assert.throws(() => authorize('read', undefined), /Unauthorized: no token provided/);
-  assert.throws(() => authorize('read', undefined, { enforceScopes: true }), /Unauthorized/);
+  const options = { xsappname: 'app' };
+  assert.throws(() => authorize('read', jwtWith(['app.write']), options), /Forbidden: operation requires scope 'read'/);
+  assert.doesNotThrow(() => authorize('read', jwtWith(['app.read']), options));
+  assert.throws(() => authorize('read', undefined, options), /Unauthorized: no token provided/);
+  assert.throws(() => authorize('read', undefined, { ...options, enforceScopes: true }), /Unauthorized/);
   assert.doesNotThrow(() => authorize('read', undefined, { enforceScopes: false }));
-  assert.doesNotThrow(() => authorize(undefined, undefined));
+  assert.doesNotThrow(() => authorize('orders.read', 'invalid', { enforceScopes: false, xsappname: '' }));
+  const disabled = { enforceScopes: false, xsappname: undefined };
+  assert.throws(() => checkScope('admin', jwtWith(['undefined.admin']), disabled), /Scope enforcement requires a non-empty xsappname/);
+  assert.doesNotThrow(() => authorize(undefined, undefined, options));
 });
 
 test('discovery executor honours enforceScopes: false', async () => {
@@ -129,6 +218,59 @@ test('discovery executor honours enforceScopes: false', async () => {
   assert.ok(!result.isError, result.content[0].text);
   assert.deepEqual(calls, ['POST IntegrationPackages']);
   await server.close();
+});
+
+test('CRUD, navigation and discovery share exact app-local scope matching', async () => {
+  for (const requiredScope of ['admin', 'user', 'orders.read']) {
+    const scoped = { enabled: true, requiredScope };
+    const definition: EntitySetDefinition = {
+      ...PACKAGES,
+      operations: { list: scoped, get: scoped, create: scoped, update: scoped, delete: scoped },
+    };
+    const attempts: Array<[string, Record<string, unknown>]> = [];
+    for (const operation of ['list', 'get', 'create', 'update', 'delete']) {
+      const args = { path: "('P')", body: { Id: 'P' } };
+      attempts.push([`IntegrationPackages_${operation}`, args]);
+      attempts.push(['execute_operation', { api: 'cpi', entitySet: 'IntegrationPackages', operation, ...args }]);
+    }
+    attempts.push(['IntegrationPackages_IntegrationDesigntimeArtifacts_list', { path: "('P')" }]);
+    for (const operation of ['list', 'get']) {
+      attempts.push(['execute_operation', {
+        api: 'cpi', entitySet: 'IntegrationPackages', operation,
+        path: "('P')", navProperty: 'IntegrationDesigntimeArtifacts',
+      }]);
+    }
+    for (const stringClaim of [false, true]) {
+      for (const [scope, allowed] of [
+        [`foreign-app.${requiredScope}`, false],
+        [requiredScope === 'user' ? 'uaa.user' : requiredScope, false],
+        [`app!t1.${requiredScope}`, true],
+      ] as const) {
+        const calls: string[] = [];
+        const client = fakeClient(calls);
+        const token = jwtWith(stringClaim ? `openid ${scope}` : ['openid', scope]);
+        const { mcp, server } = await connect((s) => {
+          registerAllTools(s, client, [definition], ['all'], undefined, { xsappname: 'app!t1' });
+          registerDiscoveryTools(s, {
+            discovery: { mode: 'search' },
+            index: buildIndex([{ name: 'cpi', client, entitySets: [definition] }], ['all']),
+            pinned: [], xsappname: 'app!t1',
+          });
+        }, token);
+        try {
+          for (const [name, args] of attempts) {
+            calls.length = 0;
+            const result = await mcp.callTool({ name, arguments: args }) as Result;
+            assert.equal(!result.isError, allowed, `${name}: ${scope}: ${result.content[0].text}`);
+            assert.equal(calls.length, allowed ? 1 : 0, `${name}: backend access`);
+            if (!allowed) assert.match(result.content[0].text!, /Forbidden/);
+          }
+        } finally {
+          await server.close();
+        }
+      }
+    }
+  }
 });
 
 // ─── Navigation tools ────────────────────────────────────────────────────────
@@ -151,8 +293,8 @@ async function navigationDecisions(def: EntitySetDefinition, token: string) {
   const client = fakeClient(calls);
   const index = buildIndex([{ name: 'cpi', client, entitySets: [def] }], ['all']);
   const { mcp, server } = await connect((s) => {
-    registerAllTools(s, client, [def], ['all'], undefined, { enforceScopes: true });
-    registerDiscoveryTools(s, { discovery: { mode: 'search' }, index, pinned: [], enforceScopes: true });
+    registerAllTools(s, client, [def], ['all'], undefined, { enforceScopes: true, xsappname: 'app' });
+    registerDiscoveryTools(s, { discovery: { mode: 'search' }, index, pinned: [], enforceScopes: true, xsappname: 'app' });
   }, token);
   const { tools } = await mcp.listTools();
   const names = new Set(tools.map((t) => t.name));
@@ -206,7 +348,7 @@ test('XSUAA: the navigation tool allows a token with the read scope', async () =
 
 test('XSUAA: the navigation tool reports the missing scope', async () => {
   const { mcp, server } = await connect((s) =>
-    registerAllTools(s, fakeClient([]), [PACKAGES], ['all'], undefined, { enforceScopes: true }),
+    registerAllTools(s, fakeClient([]), [PACKAGES], ['all'], undefined, { enforceScopes: true, xsappname: 'app' }),
   jwtWith(['app.write']));
   const nav = await mcp.callTool({ name: NAV_TOOL, arguments: { path: "('P')" } }) as Result;
   assert.equal(nav.isError, true);
@@ -239,7 +381,7 @@ test('XSUAA: list and get with different scopes — either scope reaches the nav
   });
 
   const { mcp, server } = await connect((s) =>
-    registerAllTools(s, fakeClient([]), [def], ['all'], undefined, { enforceScopes: true }),
+    registerAllTools(s, fakeClient([]), [def], ['all'], undefined, { enforceScopes: true, xsappname: 'app' }),
   jwtWith(['app.write']));
   const nav = await mcp.callTool({ name: NAV_TOOL, arguments: { path: "('P')" } }) as Result;
   assert.match(nav.content[0].text!, /Forbidden: operation requires one of the scopes 'read', 'audit'/);
@@ -290,7 +432,7 @@ test('without an enabled read operation the navigation tool is refused only when
 
     for (const token of [jwtWith(['app.write', 'app.read']), undefined]) {
       const enforced = await connect((s) =>
-        registerAllTools(s, fakeClient(calls), [def], ['all'], undefined, { enforceScopes: true }), token);
+        registerAllTools(s, fakeClient(calls), [def], ['all'], undefined, { enforceScopes: true, xsappname: 'app' }), token);
       const refused = await enforced.mcp.callTool({ name: NAV_TOOL, arguments: { path: "('P')" } }) as Result;
       assert.equal(refused.isError, true);
       assert.match(refused.content[0].text!, /Forbidden: no enabled read operation grants this call/);

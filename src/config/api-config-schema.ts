@@ -120,6 +120,7 @@ const uiViewSchema = z.object({
   description: z.string().optional(),
   uri: nonEmpty,
   template: nonEmpty,
+  requiredScope: nonEmpty.optional(),
   inputs: z.record(uiInputSchema).optional(),
   data: z.record(uiDataSourceSchema).optional(),
   partials: z.record(z.string()).optional(),
