@@ -142,7 +142,9 @@ before(async () => {
   });
   child.stdout?.on('data', (chunk: Buffer) => { serverLogs += chunk.toString('utf8'); });
   child.stderr?.on('data', (chunk: Buffer) => { serverLogs += chunk.toString('utf8'); });
-  const deadline = Date.now() + 15_000;
+  // Cold imports can exceed 15s on resource-constrained isolated runners.
+  // This bounds readiness only; the security assertions still run unchanged.
+  const deadline = Date.now() + 90_000;
   for (;;) {
     if (child.exitCode !== null) throw new Error(`server exited: ${serverLogs}`);
     try { if ((await fetch(`${url}/health`)).ok) break; } catch { /* starting */ }

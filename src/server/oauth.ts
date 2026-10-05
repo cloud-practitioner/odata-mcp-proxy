@@ -13,12 +13,55 @@ import { InvalidClientMetadataError, InvalidGrantError } from '@modelcontextprot
 import type { OAuthServerProvider } from '@modelcontextprotocol/sdk/server/auth/provider.js';
 import type { OAuthTokens } from '@modelcontextprotocol/sdk/shared/auth.js';
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import { isAbsolute, resolve as resolvePath } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { Express } from 'express';
 import { z } from 'zod';
 
 const flowSchema = z.object({ challenge: z.string(), state: z.string().optional() });
 const codeSchema = z.object({ code: z.string().min(1), challenge: z.string() });
+
+/** Environment variable that pins the xs-security.json whose redirect-uris gate OAuth. */
+export const XS_SECURITY_JSON_PATH_ENV = 'XS_SECURITY_JSON_PATH';
+
+const redirectUrisSchema = z.object({
+  'oauth2-configuration': z.object({ 'redirect-uris': z.array(z.string().min(1)).min(1) }),
+});
+
+function readRedirectUris(path: string): string[] {
+  return redirectUrisSchema.parse(JSON.parse(readFileSync(path, 'utf8')))['oauth2-configuration']['redirect-uris'];
+}
+
+/**
+ * Resolve the OAuth redirect allowlist for the running app.
+ * See docs/DEPLOYMENT.md#redirect-policy-and-deployment-constraints for the policy.
+ */
+export function resolveRedirectUris(env: NodeJS.ProcessEnv, logger: Logger): string[] {
+  const bundledPath = fileURLToPath(new URL('../../xs-security.json', import.meta.url));
+  const explicit = env[XS_SECURITY_JSON_PATH_ENV]?.trim();
+  if (explicit) {
+    const path = isAbsolute(explicit) ? explicit : resolvePath(process.cwd(), explicit);
+    let patterns: string[];
+    try {
+      patterns = readRedirectUris(path);
+    } catch (cause) {
+      throw new Error(
+        `${XS_SECURITY_JSON_PATH_ENV}=${explicit} could not be loaded as a valid xs-security.json (${path}): ` +
+          `${cause instanceof Error ? cause.message : String(cause)}`,
+      );
+    }
+    logger.info(`OAuth redirect allowlist loaded from ${XS_SECURITY_JSON_PATH_ENV} (${path})`);
+    return patterns;
+  }
+  const cwdPath = resolvePath(process.cwd(), 'xs-security.json');
+  if (cwdPath !== bundledPath && existsSync(cwdPath)) {
+    logger.info(`OAuth redirect allowlist loaded from working-directory xs-security.json (${cwdPath})`);
+    return readRedirectUris(cwdPath);
+  }
+  logger.info(`OAuth redirect allowlist loaded from bundled xs-security.json (${bundledPath})`);
+  return readRedirectUris(bundledPath);
+}
 
 class FlowStateCodec extends OAuthStateCodec {
   decodeFlow(token: string) {
@@ -41,10 +84,7 @@ class FlowStateCodec extends OAuthStateCodec {
 }
 
 export function setupXsuaaAuth(app: Express, credentials: XsuaaCredentials, appUrl: string, logger: Logger) {
-  const security = z.object({
-    'oauth2-configuration': z.object({ 'redirect-uris': z.array(z.string().min(1)).min(1) }),
-  }).parse(JSON.parse(readFileSync(new URL('../../xs-security.json', import.meta.url), 'utf8')));
-  const patterns = security['oauth2-configuration']['redirect-uris'];
+  const patterns = resolveRedirectUris(process.env, logger);
   const { provider: upstream, clientStore } = createXsuaaOAuthProvider(credentials, appUrl, {
     redirectUriPatterns: patterns,
     defaultRedirectUris: patterns.filter((uri) => !uri.includes('*')),

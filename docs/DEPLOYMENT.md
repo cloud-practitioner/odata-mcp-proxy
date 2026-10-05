@@ -176,9 +176,15 @@ A client with an independently obtained valid XSUAA access token can instead sen
 
 ### Redirect policy and deployment constraints
 
-The authoritative redirect allowlist is `oauth2-configuration.redirect-uris` in [xs-security.json](../xs-security.json), enforced both during registration/authorization and at the callback. The shared package's broader default allowlist is not used. XSUAA sees only the server callback, so the proxy must enforce the client's redirect target itself.
+The authoritative redirect allowlist is `oauth2-configuration.redirect-uris` in an `xs-security.json`, enforced both during registration/authorization and at the callback. The shared package's broader default allowlist is not used. XSUAA sees only the server callback, so the proxy must enforce the client's redirect target itself.
 
-The runtime reads `xs-security.json` from the **installed proxy package root**, not the working directory or the active API config. In a source deployment this is the repository's file; an npm consumer's separate `xs-security.json` provisions its XSUAA service but does not override the package's runtime allowlist. Ensure the server callback and intended client redirects are permitted by the deployed security configuration; changing the runtime policy requires shipping the updated package file as well as updating the XSUAA service configuration.
+When HTTP authentication is initialized with an XSUAA binding, the runtime resolves which `xs-security.json` supplies that allowlist in this order:
+
+1. `XS_SECURITY_JSON_PATH` — an explicit path, trimmed of surrounding whitespace; relative paths resolve against the process working directory. An unset, empty, or whitespace-only value uses the next source. A non-empty override that is missing, unreadable, or invalid fails startup rather than silently falling back.
+2. The running app's own `xs-security.json` in the process **working directory**, if present. A consuming app that runs `odata-mcp-proxy --config …` from its own app root therefore uses its own configured redirects. An unreadable or invalid file fails startup; only an absent file falls back.
+3. The proxy package's [bundled `xs-security.json`](../xs-security.json).
+
+The selected list replaces rather than merges with other sources and is independent of the active API config. The server logs the selected source once at startup (path only, not file contents). Each source uses the same redirect-list validation in [src/server/oauth.ts](../src/server/oauth.ts), not a full XSUAA configuration schema. Ensure the server callback and intended client redirects are permitted by the selected security configuration, and use that configuration to provision the XSUAA service instance. Consuming-app redirect coverage for Claude, Teams, Cursor, and MCP Inspector is captured in [test/redirect-allowlist.test.ts](../test/redirect-allowlist.test.ts).
 
 Public URL selection is described in the [configuration reference](../README.md#configuration). Query strings are redacted from HTTP request logs, and untrusted callback error text is HTML-escaped. The proxy disables the SDK's per-IP limits on authorization, token, registration, and revocation endpoints; deployment-level throttling, if needed, is a separate policy. OAuth security regressions are covered in [test/e2e-auth-security.test.ts](../test/e2e-auth-security.test.ts).
 
