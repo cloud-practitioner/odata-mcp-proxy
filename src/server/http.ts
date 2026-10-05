@@ -13,8 +13,8 @@
 // (`scopesSupported: []`, no `requiredScopes`) — a valid XSUAA token is
 // sufficient at the transport, and the per-tool `requiredScope` policy
 // (src/tools/registry.ts) gates individual tools against the caller JWT the
-// verifier attaches at `req.auth.token`. When no XSUAA service is bound (local
-// / stdio dev) `/mcp` is left open and a warning is logged.
+// verifier attaches at `req.auth.token`. Without a binding this module leaves
+// `/mcp` open; src/index.ts owns the fail-closed Cloud Foundry startup policy.
 //
 // Security notes (fork hardening on top of PR #5):
 //   - F17 token logging: the request logger redacts the query string, so auth
@@ -22,6 +22,9 @@
 //   - F17 Host-header poisoning: the OAuth discovery/metadata URLs are built
 //     from a configured public base URL (`PUBLIC_BASE_URL` env var) or the CF
 //     route (`VCAP_APPLICATION`), never from the request `Host` header.
+//   - F6 local HTTP posture: the listener ({@link httpBindHost}), browser
+//     policy ({@link resolveCorsOrigin}), and transport checks
+//     ({@link mcpTransportSecurity}) must not grant arbitrary remote access.
 // =============================================================================
 
 import {
@@ -30,7 +33,7 @@ import {
   loadXsuaaCredentials,
   resolveAppUrl,
 } from '@arc-mcp/xsuaa-auth';
-import cors from 'cors';
+import cors, { type CorsOptions } from 'cors';
 import express, { type Express, type NextFunction, type Request, type Response } from 'express';
 import { createRequire } from 'node:module';
 import { logger } from '../utils/logger.js';
@@ -102,8 +105,8 @@ const authLogger: AuthLogger = {
 };
 
 /**
- * Load the bound XSUAA credentials, or `undefined` when none is bound (local /
- * stdio dev — `/mcp` is then left open). An invalid binding rejects startup.
+ * Load the bound XSUAA credentials, or `undefined` when none is bound.
+ * An invalid binding rejects HTTP startup.
  */
 function loadXsuaa(): XsuaaCredentials | undefined {
   if (process.env.VCAP_SERVICES === undefined) return undefined;
@@ -131,11 +134,76 @@ export function isXsuaaConfigured(): boolean {
 }
 
 /**
+ * TCP interface the HTTP server binds. On Cloud Foundry (`VCAP_APPLICATION`)
+ * the platform router forwards external traffic to the app, so it must listen
+ * on all interfaces; outside Cloud Foundry it binds loopback to exclude remote
+ * network peers (F6). stdio never calls this.
+ */
+export function httpBindHost(): string {
+  return process.env.VCAP_APPLICATION !== undefined ? '0.0.0.0' : '127.0.0.1';
+}
+
+/**
+ * Resolve the CORS `origin` option. Reflecting an arbitrary caller's `Origin`
+ * while `credentials: true` lets any web page read authenticated responses, so
+ * even in non-production mode the allow-list uses the transport's shared
+ * origins rather than reflecting every request (F6). In
+ * production the allow-list is the configured `CORS_ORIGIN`, or nothing.
+ *
+ * @param port - TCP port the server listens on, used to build the loopback origins.
+ */
+export function resolveCorsOrigin(port: number): CorsOptions['origin'] {
+  if (process.env.NODE_ENV === 'production') {
+    return process.env.CORS_ORIGIN ?? false;
+  }
+  return localAllowedOrigins(port);
+}
+
+function localAllowedOrigins(port: number): string[] {
+  const origins = [
+    new URL(`http://127.0.0.1:${port}`).origin,
+    new URL(`http://localhost:${port}`).origin,
+  ];
+  if (process.env.CORS_ORIGIN) origins.push(process.env.CORS_ORIGIN);
+  return origins;
+}
+
+/**
+ * DNS-rebinding protection options for the Streamable HTTP transport. A local
+ * server that binds loopback must still reject a foreign `Host` to prevent
+ * DNS rebinding (F6). Origins share the non-production CORS allow-list, including
+ * an explicitly trusted `CORS_ORIGIN`, even when NODE_ENV is production.
+ * On Cloud Foundry the router uses the public route, so loopback checks would
+ * reject real requests. Protection there depends on the authenticated startup
+ * policy in src/index.ts, unless the operator explicitly opts out.
+ *
+ * @param port - TCP port the server listens on, used to build the allow-lists.
+ */
+export function mcpTransportSecurity(port: number): {
+  enableDnsRebindingProtection: boolean;
+  allowedHosts?: string[];
+  allowedOrigins?: string[];
+} {
+  if (process.env.VCAP_APPLICATION !== undefined) {
+    return { enableDnsRebindingProtection: false };
+  }
+  return {
+    enableDnsRebindingProtection: true,
+    allowedHosts: [
+      `127.0.0.1:${port}`,
+      `localhost:${port}`,
+      ...(port === 80 ? ['127.0.0.1', 'localhost'] : []),
+    ],
+    allowedOrigins: localAllowedOrigins(port),
+  };
+}
+
+/**
  * Creates an Express application pre-configured with body parsing, CORS, request
  * logging, a health check, and — when an XSUAA service is bound — the MCP-native
  * OAuth proxy plus a bearer guard on `/mcp` (via `@arc-mcp/xsuaa-auth`).
  *
- * @param port - TCP port; used for the OAuth-metadata URL fallback and logging.
+ * @param port - TCP port; used for CORS origins, the OAuth-metadata URL fallback, and logging.
  */
 export function createHttpServer(port: number): Express {
   const app = express();
@@ -156,11 +224,10 @@ export function createHttpServer(port: number): Express {
   );
 
   // ── CORS ──────────────────────────────────────────────────────────────────────
-  const isProduction = process.env.NODE_ENV === 'production';
-  const corsOrigin = process.env.CORS_ORIGIN;
+  // Keep credentials enabled only with the explicit policy in resolveCorsOrigin (F6).
   app.use(
     cors({
-      origin: isProduction ? (corsOrigin ?? false) : true,
+      origin: resolveCorsOrigin(port),
       methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
       allowedHeaders: [
         'Content-Type',
@@ -259,15 +326,17 @@ export function createHttpServer(port: number): Express {
 }
 
 /**
- * Starts the Express server on the given port.
+ * Starts the Express server on the given port using {@link httpBindHost}'s
+ * environment-selected interface; callers cannot override the bind address.
  *
  * @param app  - Application returned by {@link createHttpServer}
  * @param port - TCP port to listen on
  */
 export function startHttpServer(app: Express, port: number): Promise<void> {
+  const host = httpBindHost();
   return new Promise<void>((resolve, reject) => {
-    const server = app.listen(port, () => {
-      logger.info(`HTTP server listening on port ${port}`);
+    const server = app.listen(port, host, () => {
+      logger.info(`HTTP server listening on ${host}:${port}`);
       resolve();
     });
     server.on('error', (err: Error) => {

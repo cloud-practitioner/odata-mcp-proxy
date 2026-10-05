@@ -540,7 +540,7 @@ For detailed deployment instructions, destination configuration, and XSUAA setup
 
 ## Configuration
 
-The server validates core environment settings and the selected API config at startup using Zod and fails fast on invalid values. `NODE_ENV` and `CORS_ORIGIN` are read directly, without schema validation.
+The server validates core environment settings and the selected API config at startup using Zod and fails fast on invalid values. `NODE_ENV`, `CORS_ORIGIN`, and `ALLOW_UNAUTHENTICATED_HTTP` are read directly, without schema validation.
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
@@ -551,8 +551,9 @@ The server validates core environment settings and the selected API config at st
 | `ENABLED_API_CATEGORIES` | No | `all` | Comma-separated list of API categories to enable (see below) |
 | `API_CONFIG_FILE` | No | `api-config.json` | Config file name or absolute path. A relative name is resolved against the current working directory, then the entry-script directory, then the package's bundled `dist/config/`. |
 | `PUBLIC_BASE_URL` | No | CF route, then `http://localhost:<PORT>` | Public origin for OAuth discovery, protected-resource metadata, and the server callback (HTTP with XSUAA bound). Use HTTPS outside localhost; no base path, query, fragment, or credentials. Set it for a reverse proxy with a different host. Without an override, the first route in `VCAP_APPLICATION` is used; the request `Host` header is never used. |
-| `CORS_ORIGIN` | No | -- | HTTP CORS allow-origin value, used only when `NODE_ENV=production`; unset in production omits CORS allow-origin headers. Non-production reflects the request origin. CORS is a browser policy, not authentication. |
-| `NODE_ENV` | No | -- | `production` selects structured JSON logging and restricts HTTP CORS to `CORS_ORIGIN`; other values select pretty development logs and reflect any origin. |
+| `CORS_ORIGIN` | No | -- | Serialized browser origin (scheme and host, plus any non-default port; no path or trailing slash). With `NODE_ENV=production` it is the sole allowed CORS origin; unset omits CORS allow-origin headers. Otherwise it is added to the [loopback-origin allow-list](#http-streamable-http), including on Cloud Foundry. The server never reflects an arbitrary origin while credentials are enabled. CORS is a browser policy, not authentication. |
+| `NODE_ENV` | No | -- | `production` selects structured JSON logging; other values select pretty development logs. For HTTP CORS behavior, see `CORS_ORIGIN` above. |
+| `ALLOW_UNAUTHENTICATED_HTTP` | No | -- | Explicit opt-in for unauthenticated Cloud Foundry HTTP; see the [HTTP startup policy](#http-streamable-http) before enabling it. |
 
 > **Destination names** are configured in the active API config's `destination` field (see [API config](#3-add-your-api-config)). On BTP, credentials resolve through the bound Destination service; for local development, configure the per-destination OAuth2 env vars described in [docs/LOCAL_RUN.md](docs/LOCAL_RUN.md#local-authentication-variables).
 
@@ -723,7 +724,11 @@ The `data` value can be passed unchanged as base64 content (e.g. `ArtifactConten
 
 Used for BTP Cloud Foundry deployment. The server exposes an `/mcp` endpoint supporting the MCP Streamable HTTP transport with session management, plus an unauthenticated `/health` endpoint for CF health checks.
 
-With a complete XSUAA service binding, `/mcp` requires a valid bearer token. An incomplete or malformed binding stops HTTP startup rather than disabling authentication. Without an XSUAA binding, HTTP is **unauthenticated** and must not be exposed publicly. For MCP-native OAuth discovery and client setup, see [Connecting MCP Clients](docs/DEPLOYMENT.md#7-connecting-mcp-clients); tool-level authorization is described in [Operation Scopes](#operation-scopes).
+With a complete XSUAA service binding, `/mcp` requires a valid bearer token. An incomplete or malformed binding stops HTTP startup rather than disabling authentication. On Cloud Foundry (`VCAP_APPLICATION` present) the server **refuses to start** in HTTP mode without an XSUAA binding unless `ALLOW_UNAUTHENTICATED_HTTP=true` is set, since a publicly-routable, unauthenticated server would hold the destination's credentials. Only the literal value `true` opts in; local HTTP (no `VCAP_APPLICATION`) and stdio ignore this variable. Without an XSUAA binding off Cloud Foundry, HTTP is **unauthenticated** and must not be exposed publicly. For MCP-native OAuth discovery and client setup, see [Connecting MCP Clients](docs/DEPLOYMENT.md#7-connecting-mcp-clients); tool-level authorization is described in [Operation Scopes](#operation-scopes).
+
+Outside Cloud Foundry the HTTP server binds loopback (`127.0.0.1`) and enables the Streamable HTTP transport's DNS-rebinding protection. Allowed `Host` values are exactly `127.0.0.1:<PORT>` and `localhost:<PORT>`; on port 80 their portless forms are also accepted. When an `Origin` header is supplied, it must match `http://127.0.0.1:<PORT>`, `http://localhost:<PORT>`, or the explicit `CORS_ORIGIN`. The loopback origins omit `:80` on port 80, matching browser origin serialization. These transport checks apply regardless of `NODE_ENV`; CORS response headers follow the separate [configuration policy](#configuration). Configure `CORS_ORIGIN` only for a trusted browser client.
+
+On Cloud Foundry the server binds all interfaces (`0.0.0.0`) for the platform router and disables transport DNS-rebinding checks. Caller protection there depends on the XSUAA bearer guard; with the unauthenticated opt-in above and no XSUAA binding, that protection is absent. HTTP posture regressions are covered by [test/http-posture.test.ts](test/http-posture.test.ts) and [test/e2e-http-posture.test.ts](test/e2e-http-posture.test.ts).
 
 Each `initialize` returns a fresh server-generated UUID in the `mcp-session-id` response header. Any ID supplied on initialization is ignored without replacing an existing session; clients must use the returned ID on subsequent requests. Sessions are stored in memory with a fixed 30-minute idle TTL, measured from initialization or the last request routed to the session, and checked once per minute. Expired sessions are removed and closed.
 
