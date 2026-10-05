@@ -34,14 +34,8 @@ function readRedirectUris(path: string): string[] {
 }
 
 /**
- * Resolve the OAuth redirect allowlist for the running app. Resolution order:
- *   1. `XS_SECURITY_JSON_PATH` (relative paths resolve against the working directory).
- *      A configured-but-missing/invalid path fails at startup rather than silently
- *      falling back.
- *   2. The running app's own `xs-security.json` in the working directory — this is what
- *      a consuming app (e.g. ci-mcp-server) provisions its XSUAA instance from.
- *   3. The proxy package's bundled `xs-security.json`.
- * Logs once which source (path only, never secrets) supplied the list.
+ * Resolve the OAuth redirect allowlist for the running app.
+ * See docs/DEPLOYMENT.md#redirect-policy-and-deployment-constraints for the policy.
  */
 export function resolveRedirectUris(env: NodeJS.ProcessEnv, logger: Logger): string[] {
   const bundledPath = fileURLToPath(new URL('../../xs-security.json', import.meta.url));
