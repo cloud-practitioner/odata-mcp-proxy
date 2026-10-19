@@ -74,6 +74,7 @@ export async function start(options: StartOptions = {}): Promise<void> {
     port: config.mcpTransport === 'http' ? config.port : 'N/A',
     logLevel: config.logLevel,
     enabledCategories: config.enabledApiCategories,
+    readOnly: config.readOnly,
   });
 
   // ── 2. Create one OData client per API (singletons — own OAuth token caching)
@@ -94,6 +95,7 @@ export async function start(options: StartOptions = {}): Promise<void> {
       apiDef.pathPrefix,
       config.requestTimeout,
       apiDef.csrfProtected ?? true,
+      config.readOnly,
     );
 
     logger.info('OData client created', {

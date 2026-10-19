@@ -513,6 +513,7 @@ All configuration is managed through environment variables. The server validates
 | `LOG_LEVEL` | No | `info` | Logging level: `error`, `warn`, `info`, `debug` |
 | `REQUEST_TIMEOUT` | No | `60000` | HTTP request timeout in milliseconds |
 | `ENABLED_API_CATEGORIES` | No | `all` | Comma-separated list of API categories to enable (see below) |
+| `MCP_READ_ONLY` | No | `false` | `true` registers no create, update or delete tool, hides them from discovery, and refuses every request other than GET. For production tenants that agents should only read |
 
 ### API Categories
 

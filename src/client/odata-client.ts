@@ -75,6 +75,8 @@ export class ODataClient {
     private readonly pathPrefix: string = '/api/v1',
     private readonly timeout: number = 60000,
     private readonly csrfProtected: boolean = true,
+    /** Refuse every request other than GET (MCP_READ_ONLY=true). */
+    private readonly readOnly: boolean = false,
   ) {}
 
   /**
@@ -202,6 +204,9 @@ export class ODataClient {
     jwt?: string,
   ): Promise<T> {
     const url = `${this.pathPrefix}/${path}`;
+    if (this.readOnly) {
+      throw new Error(`Read-only mode (MCP_READ_ONLY=true): ${method.toUpperCase()} ${url} refused.`);
+    }
     logger.debug(`OData ${method}`, { url });
 
     try {
