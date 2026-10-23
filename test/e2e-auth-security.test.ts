@@ -176,10 +176,11 @@ async function registerClient(method = 'none', redirectUri = REDIRECT_URI) {
   return { ...body, status: response.status };
 }
 
-async function authorize(clientId: string, method = 'GET', redirectUri = REDIRECT_URI) {
+async function authorize(clientId: string, method = 'GET', redirectUri = REDIRECT_URI, state: string | null = 'client+state') {
   const params = new URLSearchParams({
     client_id: clientId, response_type: 'code', redirect_uri: redirectUri,
-    code_challenge: challenge(VERIFIER), code_challenge_method: 'S256', state: 'client+state',
+    code_challenge: challenge(VERIFIER), code_challenge_method: 'S256',
+    ...(state === null ? {} : { state }),
   });
   return fetch(`${discovery.authorization_endpoint}${method === 'GET' ? `?${params}` : ''}`, {
     method, redirect: 'manual',
@@ -189,9 +190,26 @@ async function authorize(clientId: string, method = 'GET', redirectUri = REDIREC
   });
 }
 
+async function approveAuthorization(clientId: string, method = 'GET', action = 'approve', state: string | null = 'client+state') {
+  const page = await authorize(clientId, method, REDIRECT_URI, state);
+  assert.equal(page.status, 200);
+  const html = await page.text();
+  assert.ok(html.includes('Approve and continue'));
+  const form = new URLSearchParams(Object.fromEntries([...html.matchAll(/name="([^"]+)" value="([^"]*)"/g)]
+    .map((m) => [m[1], m[2].replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>')])));
+  form.set('consent_action', action);
+  const response = await fetch(discovery.authorization_endpoint, {
+    method: 'POST', redirect: 'manual',
+    headers: { 'content-type': 'application/x-www-form-urlencoded', origin: url,
+      cookie: page.headers.getSetCookie().map((c) => c.split(';')[0]).join('; ') },
+    body: form,
+  });
+  assert.equal(response.status, action === 'deny' ? 303 : 302);
+  return response;
+}
+
 async function issueCode(clientId: string, method = 'GET') {
-  const response = await authorize(clientId, method);
-  assert.equal(response.status, 302);
+  const response = await approveAuthorization(clientId, method);
   const target = new URL(response.headers.get('location')!);
   assert.equal(target.origin, xsuaaUrl);
   assert.equal(target.searchParams.get('code_challenge'), challenge(VERIFIER));
@@ -200,7 +218,12 @@ async function issueCode(clientId: string, method = 'GET') {
   const upstreamResponse = await fetch(target, { redirect: 'manual' });
   const callbackUrl = upstreamResponse.headers.get('location')!;
   const rawCode = new URL(callbackUrl).searchParams.get('code')!;
-  const callback = await fetch(callbackUrl, { redirect: 'manual' });
+  const withoutApprovalCookie = await fetch(callbackUrl, { redirect: 'manual' });
+  assert.equal(withoutApprovalCookie.status, 400);
+  assert.equal(withoutApprovalCookie.headers.get('location'), null);
+  const callback = await fetch(callbackUrl, { redirect: 'manual', headers: {
+    cookie: response.headers.getSetCookie().map((c) => c.split(';')[0]).join('; '),
+  } });
   assert.equal(callback.status, 302);
   const clientTarget = new URL(callback.headers.get('location')!);
   assert.equal(clientTarget.origin, new URL(REDIRECT_URI).origin);
@@ -230,6 +253,22 @@ function withEnv(values: Record<string, string | undefined>, action: () => void)
     }
   }
 }
+
+test('Deny preserves the original client state for GET and POST authorization', async () => {
+  const client = await registerClient();
+  for (const method of ['GET', 'POST']) {
+    for (const state of ['client+state/with=encoding', '', null]) {
+      const count = tokenRequests.length;
+      const denied = await approveAuthorization(client.client_id, method, 'deny', state);
+      const target = new URL(denied.headers.get('location')!);
+      assert.equal(target.origin, new URL(REDIRECT_URI).origin);
+      assert.equal(target.searchParams.get('error'), 'access_denied');
+      assert.equal(target.searchParams.get('state'), state);
+      assert.equal(target.searchParams.get('code'), null);
+      assert.equal(tokenRequests.length, count);
+    }
+  }
+});
 
 test('R1: absent bindings stay open; malformed and incomplete bindings fail closed at both entry points', () => {
   for (const binding of [undefined, '{}', '{"destination":[]}', '{"xsuaa":[]}']) {
@@ -522,11 +561,13 @@ test('F2: code redemption without any client identity never reaches XSUAA', asyn
 
 test('F17: valid signed callback state reaches the HTML-escaping error page', async () => {
   const client = await registerClient();
-  const response = await authorize(client.client_id);
+  const response = await approveAuthorization(client.client_id);
   const state = new URL(response.headers.get('location')!).searchParams.get('state')!;
   const payload = '<script>alert("x")</script>';
   const params = new URLSearchParams({ state, error: payload, error_description: payload });
-  const callback = await fetch(`${url}/oauth/callback?${params}`, { redirect: 'manual' });
+  const callback = await fetch(`${url}/oauth/callback?${params}`, { redirect: 'manual', headers: {
+    cookie: response.headers.getSetCookie().map((c) => c.split(';')[0]).join('; '),
+  } });
   assert.equal(callback.status, 400);
   assert.equal(callback.headers.get('location'), null);
   const html = await callback.text();
@@ -578,8 +619,8 @@ test('R13: repeated authorization and revocation requests from one IP are not ra
   assert.equal(client.status, 201);
   for (let i = 0; i < 101; i++) {
     const response = await authorize(client.client_id, i % 2 === 0 ? 'GET' : 'POST');
-    assert.equal(response.status, 302, `authorization ${i + 1} must succeed`);
-    assert.equal(new URL(response.headers.get('location')!).origin, xsuaaUrl);
+    assert.equal(response.status, 200, `authorization ${i + 1} must show approval`);
+    assert.ok((await response.text()).includes('Approve and continue'));
   }
   const grant = await issueCode(client.client_id);
   const response = await token({ grant_type: 'authorization_code', code: grant.code, code_verifier: VERIFIER, client_id: client.client_id });
