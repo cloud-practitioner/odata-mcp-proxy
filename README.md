@@ -282,6 +282,10 @@ modules:
         - .git/
         - .env
         - default-env.json
+    provides:
+      - name: oauth-api
+        properties:
+          url: ${default-url}
     requires:
       - name: my-destination
       - name: my-connectivity
@@ -302,10 +306,16 @@ resources:
 
   - name: my-xsuaa
     type: org.cloudfoundry.managed-service
+    requires:
+      - name: oauth-api
     parameters:
       service: xsuaa
       service-plan: application
       path: xs-security.json
+      config:
+        oauth2-configuration:
+          redirect-uris:
+            - ~{oauth-api/url}/oauth/callback
 ```
 
 The key difference from a standalone deployment: `builder: npm` is all you need. MBT runs `npm install --production`, which installs the pre-built `odata-mcp-proxy` package from the registry. No TypeScript, no custom build commands.
