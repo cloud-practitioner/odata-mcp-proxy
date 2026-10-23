@@ -218,6 +218,9 @@ async function issueCode(clientId: string, method = 'GET') {
   const upstreamResponse = await fetch(target, { redirect: 'manual' });
   const callbackUrl = upstreamResponse.headers.get('location')!;
   const rawCode = new URL(callbackUrl).searchParams.get('code')!;
+  const withoutApprovalCookie = await fetch(callbackUrl, { redirect: 'manual' });
+  assert.equal(withoutApprovalCookie.status, 400);
+  assert.equal(withoutApprovalCookie.headers.get('location'), null);
   const callback = await fetch(callbackUrl, { redirect: 'manual', headers: {
     cookie: response.headers.getSetCookie().map((c) => c.split(';')[0]).join('; '),
   } });
