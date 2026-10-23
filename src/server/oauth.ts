@@ -91,6 +91,8 @@ export function setupXsuaaAuth(app: Express, credentials: XsuaaCredentials, appU
     defaultRedirectUris: patterns.filter((uri) => !uri.includes('*')),
     logger,
   });
+  // Must use the same signing secret/KDF as createXsuaaOAuthProvider above.
+  // If adding dcrSigningSecret or stateKdfLabel there, update this codec too.
   const stateCodec = new FlowStateCodec(credentials.clientsecret);
   const codeCodec = new OAuthStateCodec(credentials.clientsecret, { kdfLabel: 'odata-mcp-code/v1' });
   const refreshCodec = new OAuthStateCodec(credentials.clientsecret, {
