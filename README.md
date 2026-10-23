@@ -173,7 +173,7 @@ Create an `api-config.json` in your project root. The CLI automatically picks it
 }
 ```
 
-The config is validated at startup: an unknown or misspelled key, a value of the wrong type, or an unsupported `method` stops the server with a message naming the offending location (e.g. `apis[0].entitySets[3].operations.update.method`). Duplicate `apis[].name` values, including collisions with defaulted names, are rejected regardless of category filtering. Duplicate MCP tool names or resource URIs are rejected only when they would actually register, accounting for `ENABLED_API_CATEGORIES`, enabled operations, key requirements, and discovery mode. Repeated entity set names are allowed when they produce no effective registration collision. Omitted fields fall back to defaults: `server.version` to this package's version, `apis[].name` to `api<index>` (e.g. `api0`) and `apis[].pathPrefix` to `/api/v1`.
+The config is validated at startup: an unknown or misspelled key, a value of the wrong type, or an unsupported `method` stops the server with a message naming the offending location (e.g. `apis[0].entitySets[3].operations.update.method`). Duplicate `apis[].name` values, including collisions with defaulted names, are rejected regardless of category filtering. Duplicate MCP tool names or resource URIs are rejected based on the declared config, accounting for `ENABLED_API_CATEGORIES`, enabled operations, key requirements, and discovery mode. This validation runs before the `MCP_READ_ONLY` override, so read-only mode does not suppress collision errors for declared write operations. Repeated entity set names are allowed when they produce no collision under that validation. Omitted fields fall back to defaults: `server.version` to this package's version, `apis[].name` to `api<index>` (e.g. `api0`) and `apis[].pathPrefix` to `/api/v1`.
 
 Before starting either transport, the server builds and closes a throwaway MCP session to catch remaining registration failures, such as a UI data source referencing an unknown API. In HTTP mode these failures stop startup before the server listens, rather than surfacing on the first client connection.
 
@@ -558,6 +558,7 @@ The server validates core environment settings and the selected API config at st
 | `CORS_ORIGIN` | No | -- | Serialized browser origin (scheme and host, plus any non-default port; no path or trailing slash). With `NODE_ENV=production` it is the sole allowed CORS origin; unset omits CORS allow-origin headers. Otherwise it is added to the [loopback-origin allow-list](#http-streamable-http), including on Cloud Foundry. The server never reflects an arbitrary origin while credentials are enabled. CORS is a browser policy, not authentication. |
 | `NODE_ENV` | No | -- | `production` selects structured JSON logging; other values select pretty development logs. For HTTP CORS behavior, see `CORS_ORIGIN` above. |
 | `ALLOW_UNAUTHENTICATED_HTTP` | No | -- | Explicit opt-in for unauthenticated Cloud Foundry HTTP; see the [HTTP startup policy](#http-streamable-http) before enabling it. |
+| `MCP_READ_ONLY` | No | `false` | Only the literal `true` enables read-only mode: disables create/update/delete on every configured entity set, hides those operations from discovery, and makes the shared OData clients reject non-GET backend API calls. Applies to both transports, not to MCP transport methods or OAuth token requests. Custom extras that bypass the shared clients are not constrained. |
 
 > **Destination names** are configured in the active API config's `destination` field (see [API config](#3-add-your-api-config)). On BTP, credentials resolve through the bound Destination service; for local development, configure the per-destination OAuth2 env vars described in [docs/LOCAL_RUN.md](docs/LOCAL_RUN.md#local-authentication-variables).
 
@@ -602,7 +603,7 @@ Programmatic callers of `registerAllTools` / `registerEntityTools`, `registerDis
 
 ## Available Tools
 
-Tools are dynamically generated from entity set definitions. Each entity set produces up to five tools (`_list`, `_get`, `_create`, `_update`, `_delete`) plus navigation property tools, depending on what the OData API supports.
+Tools are dynamically generated from entity set definitions. Each entity set produces up to five tools (`_list`, `_get`, `_create`, `_update`, `_delete`) plus navigation property tools, depending on the active config and the [configuration filters](#configuration), including `MCP_READ_ONLY`. The tables below describe the bundled CPI config without those filters.
 
 Read the Markdown resource `odata-mcp-proxy://api/overview` for an overview of entity sets in enabled categories, their available CRUD operations, keys, navigation properties, and filter hints. Definitions without CRUD operations remain visible so navigation-only APIs retain their guidance. The URI is fixed regardless of the configured server name; clients using the former `{serverName}://api/overview` URI must switch to this URI.
 
