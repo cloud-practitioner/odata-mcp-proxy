@@ -1,5 +1,7 @@
 # OData MCP Proxy
 
+> Upgrading an XSUAA deployment? Read the [OAuth upgrade guide](docs/XSUAA-AUTH-UPGRADE.md) before redeploying.
+
 A config-driven [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server that exposes OData and REST APIs as MCP tools. This enables AI assistants such as Claude to query, manage, and monitor SAP backends through natural language.
 
 The server runs on SAP BTP Cloud Foundry and uses BTP Destinations for secure, token-managed connectivity to OData APIs.
