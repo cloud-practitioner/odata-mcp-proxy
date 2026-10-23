@@ -1,0 +1,23 @@
+{
+  "server": {
+    "name": "read-only-e2e",
+    "version": "0.0.1",
+    "description": "Stub config for the read-only end-to-end test"
+  },
+  "apis": [
+    {
+      "name": "stub",
+      "destination": "STUB",
+      "pathPrefix": "/api/v1",
+      "entitySets": [
+        {
+          "entitySet": "Packages",
+          "description": "packages",
+          "category": "artifacts",
+          "keys": [{ "name": "Id", "type": "string" }],
+          "operations": { "list": true, "get": true, "create": true, "update": true, "delete": true }
+        }
+      ]
+    }
+  ]
+}

@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join, isAbsolute } from 'node:path';
 import type { EntitySetDefinition } from '../tools/registry.js';
 import { parseApiConfig, type UpdateMethod } from './api-config-schema.js';
+import { applyReadOnly } from './read-only.js';
 
 export { UPDATE_METHODS, type UpdateMethod } from './api-config-schema.js';
 
@@ -44,6 +45,9 @@ const configSchema = z.object({
     .default(60000),
 
   apiConfigFile: z.string().default('api-config.json'),
+
+  // Only the exact string "true" turns read-only mode on.
+  readOnly: z.string().optional().transform((v) => v === "true"),
 });
 
 /** Inferred type from the raw Zod schema (enabledApiCategories is still a string). */
@@ -91,6 +95,7 @@ export function loadConfig(): Config {
     enabledApiCategories: process.env.ENABLED_API_CATEGORIES,
     requestTimeout: process.env.REQUEST_TIMEOUT,
     apiConfigFile: process.env.API_CONFIG_FILE,
+    readOnly: process.env.MCP_READ_ONLY,
   };
 
   const result = configSchema.safeParse(rawInput);
@@ -411,6 +416,8 @@ export const apiConfigDir: string = dirname(apiConfigPath);
  * Loaded from the file specified by `API_CONFIG_FILE` (default: api-config.json).
  */
 export const apiConfig: ApiConfig = loadApiConfig(apiConfigPath);
+
+if (config.readOnly) applyReadOnly(apiConfig.apis);
 
 /**
  * Read and validate the API config file.

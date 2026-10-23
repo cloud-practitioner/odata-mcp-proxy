@@ -558,6 +558,7 @@ The server validates core environment settings and the selected API config at st
 | `CORS_ORIGIN` | No | -- | Serialized browser origin (scheme and host, plus any non-default port; no path or trailing slash). With `NODE_ENV=production` it is the sole allowed CORS origin; unset omits CORS allow-origin headers. Otherwise it is added to the [loopback-origin allow-list](#http-streamable-http), including on Cloud Foundry. The server never reflects an arbitrary origin while credentials are enabled. CORS is a browser policy, not authentication. |
 | `NODE_ENV` | No | -- | `production` selects structured JSON logging; other values select pretty development logs. For HTTP CORS behavior, see `CORS_ORIGIN` above. |
 | `ALLOW_UNAUTHENTICATED_HTTP` | No | -- | Explicit opt-in for unauthenticated Cloud Foundry HTTP; see the [HTTP startup policy](#http-streamable-http) before enabling it. |
+| `MCP_READ_ONLY` | No | `false` | `true` registers no create, update or delete tool, hides them from discovery, and refuses every request other than GET. For production tenants that agents should only read |
 
 > **Destination names** are configured in the active API config's `destination` field (see [API config](#3-add-your-api-config)). On BTP, credentials resolve through the bound Destination service; for local development, configure the per-destination OAuth2 env vars described in [docs/LOCAL_RUN.md](docs/LOCAL_RUN.md#local-authentication-variables).
 
