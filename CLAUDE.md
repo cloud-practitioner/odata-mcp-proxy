@@ -28,7 +28,7 @@ npm run build:btp    # Build MTA archive
 npm run deploy:btp   # Deploy via CF CLI
 ```
 
-Tests live in `test/` (unit tests for the API config schema, UI layer, destination fallback and response decoding, the `/health` version endpoint and the npm-pack packaging guard, plus stdio end-to-end tests against stub configs in `test/fixtures/`; `e2e-binary.test.ts` runs a local HTTP stub standing in for the OAuth endpoint and CPI). `e2e-method.test.ts` also exists as a local-HTTP-stub test but is not part of the default `npm test` script.
+Tests live in `test/` (unit tests for the API config schema, UI layer, destination fallback and response decoding, the `/health` version endpoint and the npm-pack packaging guard, plus stdio end-to-end tests against stub configs in `test/fixtures/`; `e2e-binary.test.ts` runs a local HTTP stub standing in for the OAuth endpoint and CPI). `npm test` runs every `test/*.test.ts` (a glob), so a new test file needs no registration in `package.json`.
 
 ## Architecture
 

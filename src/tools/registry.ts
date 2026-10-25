@@ -10,6 +10,7 @@ import {
 } from '../config/index.js';
 import { logger } from '../utils/logger.js';
 import { buildEntityPath } from './path-guard.js';
+import { strictInput } from './strict-input.js';
 
 // ─── Tool Definition Types ───────────────────────────────────────────────────
 
@@ -103,7 +104,7 @@ export function formatToolError(message: string): CallToolResult {
  * path suffix itself — LLMs understand OData well enough to build key
  * expressions, query options, and navigation paths.
  */
-const genericToolSchema = {
+const genericToolShape = {
   path: z.string().optional().describe(
     'OData path suffix appended to the entity set (keys, query params, nav properties). ' +
     'Examples: "?$filter=Name eq \'test\'&$top=10", "(\'MyId\')?$select=Id,Name", "(Id=\'x\',Version=\'y\')"',
@@ -115,6 +116,8 @@ const genericToolSchema = {
     'Additional HTTP headers to include in the request',
   ),
 };
+
+const genericToolSchema = strictInput(genericToolShape);
 
 // ─── Tool Registration ───────────────────────────────────────────────────────
 
@@ -349,10 +352,12 @@ export function registerEntityTools(
   const opDelete = resolveOperation(operations.delete);
 
   if (opList.enabled) {
-    server.tool(
+    server.registerTool(
       `${entitySet}_list`,
-      `List ${description}. Returns a collection of entities with optional OData query options (GET).${keyHint}`,
-      genericToolSchema,
+      {
+        description: `List ${description}. Returns a collection of entities with optional OData query options (GET).${keyHint}`,
+        inputSchema: genericToolSchema,
+      },
       async (args, extra) => {
         try { authorize(opList.requiredScope, extra.authInfo?.token, scopeOptions); }
         catch (e) { return formatToolError(e instanceof Error ? e.message : String(e)); }
@@ -362,10 +367,12 @@ export function registerEntityTools(
   }
 
   if (opGet.enabled && keys.length > 0) {
-    server.tool(
+    server.registerTool(
       `${entitySet}_get`,
-      `Get a single ${description} by its key(s) (GET).${keyHint}`,
-      genericToolSchema,
+      {
+        description: `Get a single ${description} by its key(s) (GET).${keyHint}`,
+        inputSchema: genericToolSchema,
+      },
       async (args, extra) => {
         try { authorize(opGet.requiredScope, extra.authInfo?.token, scopeOptions); }
         catch (e) { return formatToolError(e instanceof Error ? e.message : String(e)); }
@@ -375,10 +382,12 @@ export function registerEntityTools(
   }
 
   if (opCreate.enabled) {
-    server.tool(
+    server.registerTool(
       `${entitySet}_create`,
-      `Create a new ${description} (POST). Provide entity properties in the body.`,
-      genericToolSchema,
+      {
+        description: `Create a new ${description} (POST). Provide entity properties in the body.`,
+        inputSchema: genericToolSchema,
+      },
       async (args, extra) => {
         try { authorize(opCreate.requiredScope, extra.authInfo?.token, scopeOptions); }
         catch (e) { return formatToolError(e instanceof Error ? e.message : String(e)); }
@@ -393,12 +402,14 @@ export function registerEntityTools(
   // a keyless delete would target the whole collection, so those stay gated.
   if (opUpdate.enabled) {
     const updateMethod = opUpdate.method ?? DEFAULT_UPDATE_METHOD;
-    server.tool(
+    server.registerTool(
       `${entitySet}_update`,
-      keys.length > 0
-        ? `Update an existing ${description} (${updateMethod}). Provide key(s) in path and properties in body.${keyHint}`
-        : `Update ${description} (${updateMethod}). This is a collection-level update: provide the payload in body, no key in path.`,
-      genericToolSchema,
+      {
+        description: keys.length > 0
+          ? `Update an existing ${description} (${updateMethod}). Provide key(s) in path and properties in body.${keyHint}`
+          : `Update ${description} (${updateMethod}). This is a collection-level update: provide the payload in body, no key in path.`,
+        inputSchema: genericToolSchema,
+      },
       async (args, extra) => {
         try { authorize(opUpdate.requiredScope, extra.authInfo?.token, scopeOptions); }
         catch (e) { return formatToolError(e instanceof Error ? e.message : String(e)); }
@@ -408,10 +419,12 @@ export function registerEntityTools(
   }
 
   if (opDelete.enabled && keys.length > 0) {
-    server.tool(
+    server.registerTool(
       `${entitySet}_delete`,
-      `Delete a ${description} by its key(s) (DELETE).${keyHint}`,
-      genericToolSchema,
+      {
+        description: `Delete a ${description} by its key(s) (DELETE).${keyHint}`,
+        inputSchema: genericToolSchema,
+      },
       async (args, extra) => {
         try { authorize(opDelete.requiredScope, extra.authInfo?.token, scopeOptions); }
         catch (e) { return formatToolError(e instanceof Error ? e.message : String(e)); }
@@ -437,11 +450,14 @@ export function registerEntityTools(
 
   if (navigationProperties) {
     for (const nav of navigationProperties) {
-      server.tool(
+      server.registerTool(
         `${entitySet}_${nav.name}_list`,
-        `Get ${nav.description ?? nav.name} for a specific ${description} (GET). ` +
-          `Provide the parent entity key(s) in path, then /${nav.name} is appended automatically.${keyHint}`,
-        genericToolSchema,
+        {
+          description:
+            `Get ${nav.description ?? nav.name} for a specific ${description} (GET). ` +
+            `Provide the parent entity key(s) in path, then /${nav.name} is appended automatically.${keyHint}`,
+          inputSchema: genericToolSchema,
+        },
         async (args, extra) => {
           try { authorizeAnyOf(navReadScopes, extra.authInfo?.token, scopeOptions); }
           catch (e) { return formatToolError(e instanceof Error ? e.message : String(e)); }

@@ -558,7 +558,7 @@ The server validates core environment settings and the selected API config at st
 | `CORS_ORIGIN` | No | -- | Serialized browser origin (scheme and host, plus any non-default port; no path or trailing slash). With `NODE_ENV=production` it is the sole allowed CORS origin; unset omits CORS allow-origin headers. Otherwise it is added to the [loopback-origin allow-list](#http-streamable-http), including on Cloud Foundry. The server never reflects an arbitrary origin while credentials are enabled. CORS is a browser policy, not authentication. |
 | `NODE_ENV` | No | -- | `production` selects structured JSON logging; other values select pretty development logs. For HTTP CORS behavior, see `CORS_ORIGIN` above. |
 | `ALLOW_UNAUTHENTICATED_HTTP` | No | -- | Explicit opt-in for unauthenticated Cloud Foundry HTTP; see the [HTTP startup policy](#http-streamable-http) before enabling it. |
-| `MCP_READ_ONLY` | No | `false` | Only the literal `true` enables read-only mode: disables create/update/delete on every configured entity set, hides those operations from discovery, and makes the shared OData clients reject non-GET backend API calls. Applies to both transports, not to MCP transport methods or OAuth token requests. Custom extras that bypass the shared clients are not constrained. |
+| `MCP_READ_ONLY` | No | `false` | `true` or `1` enables read-only mode; `false`, `0`, unset or empty leaves it off. Values are trimmed and case-insensitive. Any other value (for example `yes` or `on`) stops startup with an error naming `MCP_READ_ONLY` and the accepted values, so a typo never silently grants write access. Read-only mode disables create/update/delete on every configured entity set, hides those operations from discovery, and makes the shared OData clients reject non-GET backend API calls. Applies to both transports, not to MCP transport methods or OAuth token requests. Custom extras that bypass the shared clients are not constrained. |
 
 > **Destination names** are configured in the active API config's `destination` field (see [API config](#3-add-your-api-config)). On BTP, credentials resolve through the bound Destination service; for local development, configure the per-destination OAuth2 env vars described in [docs/LOCAL_RUN.md](docs/LOCAL_RUN.md#local-authentication-variables).
 
@@ -683,6 +683,8 @@ MessageProcessingLogs_ErrorInformations_list
 
 ### Tool Request Arguments
 
+Generated entity and navigation tools, `search_operations`, `execute_operation`, and configured UI tools reject unknown top-level arguments with an `isError` tool result naming the unrecognized keys, before any backend request. Use only the arguments declared in each tool's input schema.
+
 Generated entity tools and `execute_operation` accept a `path` **suffix**, not a full URL or an API-root path. It is appended to the configured `urlPath` (default: `entitySet`) under the API's `pathPrefix`. Omit it or use an empty string to address the collection, where the operation permits it.
 
 A nonempty suffix must start with one of:
@@ -700,7 +702,7 @@ The optional `headers` argument is filtered case-insensitively through `ALLOWED_
 
 ### OData Query Parameters
 
-All `_list` tools accept standard OData V2 query options:
+All `_list` tools accept standard OData V2 query options in the `path` query string, for example `{ "path": "?$filter=Status eq 'FAILED'&$top=10" }`:
 
 - `$filter` -- e.g., `"Status eq 'FAILED'"`
 - `$select` -- e.g., `"Id,Name,Status"`

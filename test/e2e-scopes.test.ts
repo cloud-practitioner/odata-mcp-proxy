@@ -25,7 +25,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { createSign, generateKeyPairSync } from 'node:crypto';
+import { createSign, generateKeyPairSync, randomBytes } from 'node:crypto';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
@@ -34,6 +34,8 @@ const rootDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 const configPath = join(rootDir, 'test', 'fixtures', 'e2e-scopes-config.json');
 const unregisteredScopesConfigPath = join(rootDir, 'test', 'fixtures', 'e2e-scopes-unregistered-config.json');
 const keylessScopesConfigPath = join(rootDir, 'test', 'fixtures', 'e2e-scopes-keyless-config.json');
+const opScopesConfigPath = join(rootDir, 'test', 'fixtures', 'e2e-op-scopes-config.json');
+const binaryScopesConfigPath = join(rootDir, 'test', 'fixtures', 'e2e-binary-scopes-config.json');
 const serverEntry = join(rootDir, 'dist', 'index.js');
 
 const PACKAGES = { d: { results: [{ Id: 'Pkg_A', Name: 'Package A' }] } };
@@ -75,6 +77,11 @@ before(async () => {
     if (req.method === 'POST' && url === '/api/v1/IntegrationPackages') {
       res.writeHead(201, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ d: { Id: 'Pkg_B' } }));
+      return;
+    }
+    if (url === "/api/v1/IntegrationPackages('Pkg_A')" && ['GET', 'PATCH', 'DELETE'].includes(req.method ?? '')) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ d: { Id: 'Pkg_A' } }));
       return;
     }
     res.writeHead(404, { 'content-type': 'application/json' });
@@ -534,6 +541,154 @@ test('HTTP with XSUAA bound: navigation tools enforce the parent read scope', as
       );
     } finally {
       await withScope.close();
+    }
+  } finally {
+    await stopHttp(child);
+    await closeXsuaa();
+  }
+});
+
+test('HTTP with XSUAA bound: scoped binary transfers preserve bytes and forbid backend access without scope', async (t) => {
+  const zip = Buffer.concat([Buffer.from([0x50, 0x4b, 0x03, 0x04]), randomBytes(2 * 1024 * 1024)]);
+  const path = "(Id='Flow_Big',Version='1.0%2F1')/$value";
+  const downloadUrl = `/api/v1/IntegrationDesigntimeArtifacts${path}`;
+  const uploadUrl = '/api/v1/IntegrationDesigntimeArtifacts';
+  const requests: string[] = [];
+  const uploads: Buffer[] = [];
+  const binaryStub = createServer(async (req, res) => {
+    requests.push(`${req.method} ${req.url}`);
+    if (String(req.headers['x-csrf-token']).toLowerCase() === 'fetch') {
+      res.writeHead(200, { 'x-csrf-token': 'stub-csrf' });
+      res.end();
+      return;
+    }
+    if (req.method === 'GET' && req.url === downloadUrl) {
+      res.writeHead(200, { 'content-type': 'application/zip' });
+      res.end(zip);
+      return;
+    }
+    if (req.method === 'POST' && req.url === uploadUrl) {
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) chunks.push(Buffer.from(chunk));
+      const payload = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { ArtifactContent: string };
+      uploads.push(Buffer.from(payload.ArtifactContent, 'base64'));
+      res.writeHead(201, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ d: { Id: 'Flow_Big_copy' } }));
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  await new Promise<void>((resolve) => binaryStub.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise<void>((resolve) => binaryStub.close(() => resolve())));
+  const binaryBaseUrl = `http://127.0.0.1:${(binaryStub.address() as AddressInfo).port}`;
+  const { vcap, sign, close: closeXsuaa } = await fakeXsuaa();
+  t.after(closeXsuaa);
+  const { url, child } = await startHttp({
+    API_CONFIG_FILE: binaryScopesConfigPath,
+    VCAP_SERVICES: JSON.stringify(vcap),
+    destinations: JSON.stringify([{ name: 'E2E_SCOPES_DEST', url: binaryBaseUrl }]),
+    NODE_TLS_REJECT_UNAUTHORIZED: '0',
+  });
+  t.after(() => stopHttp(child));
+
+  for (const held of ['read', 'write', undefined] as const) {
+    const client = new Client({ name: 'e2e-binary-scopes', version: '0.0.0' });
+    try {
+      await client.connect(new StreamableHTTPClientTransport(new URL(`${url}/mcp`), {
+        requestInit: { headers: { Authorization: `Bearer ${sign(held ? [`e2e.${held}`] : [])}` } },
+      }));
+      for (const operation of ['get', 'create'] as const) {
+        const requiredScope = operation === 'get' ? 'read' : 'write';
+        const args = operation === 'get'
+          ? { path }
+          : { body: { Id: 'Flow_Big_copy', Name: 'Flow Big copy', PackageId: 'Pkg', ArtifactContent: zip.toString('base64') } };
+        for (const [tool, toolArgs] of [
+          [`IntegrationDesigntimeArtifacts_${operation}`, args],
+          ['execute_operation', { api: 'cpi', entitySet: 'IntegrationDesigntimeArtifacts', operation, ...args }],
+        ] as const) {
+          requests.length = 0;
+          uploads.length = 0;
+          const result = await call(client, tool, toolArgs);
+          const label = `${tool} (${operation}) with ${held ?? 'no'} scope`;
+          if (held !== requiredScope) {
+            assert.equal(result.isError, true, `${label} must be refused`);
+            assert.match(textOf(result), new RegExp(`Forbidden: operation requires scope '${requiredScope}'`), label);
+            assert.deepEqual(requests, [], `${label} must not contact the backend, including CSRF requests`);
+            assert.deepEqual(uploads, [], label);
+            continue;
+          }
+          assert.ok(!result.isError, `${label}: ${textOf(result).slice(0, 200)}`);
+          if (operation === 'get') {
+            const envelope = JSON.parse(textOf(result)) as { contentType: string; encoding: string; size: number; data: string };
+            assert.equal(envelope.contentType, 'application/zip', label);
+            assert.equal(envelope.encoding, 'base64', label);
+            assert.equal(envelope.size, zip.length, label);
+            assert.deepEqual(Buffer.from(envelope.data, 'base64'), zip, label);
+            assert.deepEqual(requests, [`GET ${downloadUrl}`], label);
+          } else {
+            assert.deepEqual(JSON.parse(textOf(result)), { d: { Id: 'Flow_Big_copy' } }, label);
+            assert.deepEqual(uploads, [zip], `${label} must upload byte-identical ArtifactContent`);
+            assert.deepEqual(requests.filter((request) => request.startsWith('POST ')), [`POST ${uploadUrl}`], label);
+          }
+        }
+      }
+    } finally {
+      await client.close();
+    }
+  }
+});
+
+// ─── HTTP with XSUAA: one distinct scope per operation ───────────────────────
+
+test('HTTP with XSUAA bound: each operation requires its own scope', async () => {
+  const { vcap, sign, close: closeXsuaa } = await fakeXsuaa();
+  const { url, child } = await startHttp({
+    API_CONFIG_FILE: opScopesConfigPath,
+    VCAP_SERVICES: JSON.stringify(vcap),
+    destinations: JSON.stringify([{ name: 'E2E_SCOPES_DEST', url: baseUrl }]),
+    NODE_TLS_REJECT_UNAUTHORIZED: '0',
+  });
+
+  const operations = {
+    list: { method: 'GET', path: '', args: {} },
+    get: { method: 'GET', path: "('Pkg_A')", args: { path: "('Pkg_A')" } },
+    create: { method: 'POST', path: '', args: { body: { Id: 'Pkg_B' } } },
+    update: { method: 'PATCH', path: "('Pkg_A')", args: { path: "('Pkg_A')", body: { Name: 'N' } } },
+    delete: { method: 'DELETE', path: "('Pkg_A')", args: { path: "('Pkg_A')" } },
+  } as const;
+  type Operation = keyof typeof operations;
+  const names = Object.keys(operations) as Operation[];
+
+  try {
+    for (const held of names) {
+      const client = new Client({ name: 'e2e-op-scopes', version: '0.0.0' });
+      await client.connect(new StreamableHTTPClientTransport(new URL(`${url}/mcp`), {
+        requestInit: { headers: { Authorization: `Bearer ${sign([`e2e.op_${held}`])}` } },
+      }));
+      try {
+        for (const op of names) {
+          const { method, path, args } = operations[op];
+          for (const [tool, toolArgs] of [
+            [`IntegrationPackages_${op}`, args],
+            ['execute_operation', { api: 'cpi', entitySet: 'IntegrationPackages', operation: op, ...args }],
+          ] as const) {
+            backendCalls.length = 0;
+            const result = await call(client, tool, toolArgs);
+            const label = `${tool} (${op}) with only the op_${held} scope`;
+            if (op === held) {
+              assert.ok(!result.isError, `${label}: ${textOf(result)}`);
+              assert.deepEqual(backendCalls, [`${method} /api/v1/IntegrationPackages${path}`], label);
+            } else {
+              assert.equal(result.isError, true, `${label} must be refused`);
+              assert.match(textOf(result), new RegExp(`Forbidden: operation requires scope 'op_${op}'`), label);
+              assert.deepEqual(backendCalls, [], `${label} must not reach the backend`);
+            }
+          }
+        }
+      } finally {
+        await client.close();
+      }
     }
   } finally {
     await stopHttp(child);

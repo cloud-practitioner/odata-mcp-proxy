@@ -1,0 +1,33 @@
+{
+  "server": {
+    "name": "op-scopes-e2e",
+    "version": "0.0.1",
+    "description": "Stub config where every operation of IntegrationPackages has its own distinct requiredScope"
+  },
+  "discovery": {
+    "mode": "hybrid",
+    "alwaysRegister": ["IntegrationPackages"]
+  },
+  "apis": [
+    {
+      "name": "cpi",
+      "destination": "E2E_SCOPES_DEST",
+      "pathPrefix": "/api/v1",
+      "entitySets": [
+        {
+          "entitySet": "IntegrationPackages",
+          "description": "Integration packages",
+          "category": "integration-content",
+          "keys": [{ "name": "Id", "type": "string" }],
+          "operations": {
+            "list": { "enabled": true, "requiredScope": "op_list" },
+            "get": { "enabled": true, "requiredScope": "op_get" },
+            "create": { "enabled": true, "requiredScope": "op_create" },
+            "update": { "enabled": true, "requiredScope": "op_update" },
+            "delete": { "enabled": true, "requiredScope": "op_delete" }
+          }
+        }
+      ]
+    }
+  ]
+}
