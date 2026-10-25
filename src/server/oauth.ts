@@ -12,7 +12,7 @@ import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middlew
 import { InvalidClientMetadataError, InvalidGrantError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
 import type { OAuthServerProvider } from '@modelcontextprotocol/sdk/server/auth/provider.js';
 import type { OAuthTokens } from '@modelcontextprotocol/sdk/shared/auth.js';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { isAbsolute, resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -166,7 +166,15 @@ export function setupXsuaaAuth(app: Express, credentials: XsuaaCredentials, appU
         if (method !== 'none' && method !== 'client_secret_post') {
           throw new InvalidClientMetadataError('token_endpoint_auth_method must be none or client_secret_post');
         }
-        return clientStore.registerClient({ ...client, token_endpoint_auth_method: method });
+        // xsuaa-auth derives client_id from the metadata plus a whole-second timestamp, and the secret from client_id.
+        // A per-registration nonce in client_name keeps identical same-second registrations apart (RFC 7591 3.2.1
+        // lets the server replace requested metadata). Remove this when the library adds its own nonce.
+        const nonce = randomBytes(9).toString('base64url');
+        return clientStore.registerClient({
+          ...client,
+          token_endpoint_auth_method: method,
+          client_name: `${client.client_name || 'mcp-client'} #${nonce}`,
+        });
       },
     },
     skipLocalPkceValidation: true,

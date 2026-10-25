@@ -22,6 +22,14 @@ resource's `parameters.config.oauth2-configuration.redirect-uris` with the exact
 callback too. Check the effective service configuration after deployment; older extension
 descriptors can override the new defaults.
 
+### Client registration names
+
+The library derives each client ID from the registration metadata and the current second. Two
+identical registrations in the same second got the same client ID and the same client secret. The
+adapter now adds a random suffix to `client_name` (for example `My Client #Xk3...`) on every
+registration. Each client gets its own ID and secret. The approval page shows the suffixed name.
+Remove the suffix when the library adds its own per-registration nonce.
+
 ### Existing consuming applications
 
 This project also reads `xs-security.json` (or `XS_SECURITY_JSON_PATH`) as its **runtime MCP

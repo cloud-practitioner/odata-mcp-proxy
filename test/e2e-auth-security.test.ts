@@ -319,6 +319,32 @@ test('F1: unauthenticated DCR does not expose the XSUAA secret for public or con
   }
 });
 
+test('R12: identical same-second registrations get distinct client ids and secrets', async () => {
+  const register = async (method: string, name?: string) => {
+    const response = await fetch(discovery.registration_endpoint, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ redirect_uris: [REDIRECT_URI], token_endpoint_auth_method: method, ...(name ? { client_name: name } : {}) }),
+    });
+    assert.equal(response.status, 201);
+    return await response.json() as { client_id: string; client_secret?: string; client_name?: string };
+  };
+  for (const method of ['none', 'client_secret_post']) {
+    for (const name of ['same-name', undefined]) {
+      // Five concurrent copies per case make a whole-second timestamp collision certain without the nonce.
+      const clients = await Promise.all(Array.from({ length: 5 }, () => register(method, name)));
+      assert.equal(new Set(clients.map((c) => c.client_id)).size, clients.length);
+      if (method === 'client_secret_post') {
+        assert.equal(new Set(clients.map((c) => c.client_secret)).size, clients.length);
+      }
+      for (const client of clients) {
+        assert.ok(client.client_name?.startsWith(`${name ?? 'mcp-client'} #`));
+        const page = await authorize(client.client_id);
+        assert.equal(page.status, 200);
+      }
+    }
+  }
+});
+
 test('R11: omitted authentication method advertises and honors client_secret_post for both grants and revocation', async () => {
   const registration = await fetch(discovery.registration_endpoint, {
     method: 'POST', headers: { 'content-type': 'application/json' },
