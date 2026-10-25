@@ -34,6 +34,7 @@ const rootDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 const configPath = join(rootDir, 'test', 'fixtures', 'e2e-scopes-config.json');
 const unregisteredScopesConfigPath = join(rootDir, 'test', 'fixtures', 'e2e-scopes-unregistered-config.json');
 const keylessScopesConfigPath = join(rootDir, 'test', 'fixtures', 'e2e-scopes-keyless-config.json');
+const opScopesConfigPath = join(rootDir, 'test', 'fixtures', 'e2e-op-scopes-config.json');
 const serverEntry = join(rootDir, 'dist', 'index.js');
 
 const PACKAGES = { d: { results: [{ Id: 'Pkg_A', Name: 'Package A' }] } };
@@ -75,6 +76,11 @@ before(async () => {
     if (req.method === 'POST' && url === '/api/v1/IntegrationPackages') {
       res.writeHead(201, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ d: { Id: 'Pkg_B' } }));
+      return;
+    }
+    if (url === "/api/v1/IntegrationPackages('Pkg_A')" && ['GET', 'PATCH', 'DELETE'].includes(req.method ?? '')) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ d: { Id: 'Pkg_A' } }));
       return;
     }
     res.writeHead(404, { 'content-type': 'application/json' });
@@ -534,6 +540,63 @@ test('HTTP with XSUAA bound: navigation tools enforce the parent read scope', as
       );
     } finally {
       await withScope.close();
+    }
+  } finally {
+    await stopHttp(child);
+    await closeXsuaa();
+  }
+});
+
+// ─── HTTP with XSUAA: one distinct scope per operation ───────────────────────
+
+test('HTTP with XSUAA bound: each operation requires its own scope', async () => {
+  const { vcap, sign, close: closeXsuaa } = await fakeXsuaa();
+  const { url, child } = await startHttp({
+    API_CONFIG_FILE: opScopesConfigPath,
+    VCAP_SERVICES: JSON.stringify(vcap),
+    destinations: JSON.stringify([{ name: 'E2E_SCOPES_DEST', url: baseUrl }]),
+    NODE_TLS_REJECT_UNAUTHORIZED: '0',
+  });
+
+  const operations = {
+    list: { method: 'GET', path: '', args: {} },
+    get: { method: 'GET', path: "('Pkg_A')", args: { path: "('Pkg_A')" } },
+    create: { method: 'POST', path: '', args: { body: { Id: 'Pkg_B' } } },
+    update: { method: 'PATCH', path: "('Pkg_A')", args: { path: "('Pkg_A')", body: { Name: 'N' } } },
+    delete: { method: 'DELETE', path: "('Pkg_A')", args: { path: "('Pkg_A')" } },
+  } as const;
+  type Operation = keyof typeof operations;
+  const names = Object.keys(operations) as Operation[];
+
+  try {
+    for (const held of names) {
+      const client = new Client({ name: 'e2e-op-scopes', version: '0.0.0' });
+      await client.connect(new StreamableHTTPClientTransport(new URL(`${url}/mcp`), {
+        requestInit: { headers: { Authorization: `Bearer ${sign([`e2e.op_${held}`])}` } },
+      }));
+      try {
+        for (const op of names) {
+          const { method, path, args } = operations[op];
+          for (const [tool, toolArgs] of [
+            [`IntegrationPackages_${op}`, args],
+            ['execute_operation', { api: 'cpi', entitySet: 'IntegrationPackages', operation: op, ...args }],
+          ] as const) {
+            backendCalls.length = 0;
+            const result = await call(client, tool, toolArgs);
+            const label = `${tool} (${op}) with only the op_${held} scope`;
+            if (op === held) {
+              assert.ok(!result.isError, `${label}: ${textOf(result)}`);
+              assert.deepEqual(backendCalls, [`${method} /api/v1/IntegrationPackages${path}`], label);
+            } else {
+              assert.equal(result.isError, true, `${label} must be refused`);
+              assert.match(textOf(result), new RegExp(`Forbidden: operation requires scope 'op_${op}'`), label);
+              assert.deepEqual(backendCalls, [], `${label} must not reach the backend`);
+            }
+          }
+        }
+      } finally {
+        await client.close();
+      }
     }
   } finally {
     await stopHttp(child);

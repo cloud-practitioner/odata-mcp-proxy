@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join, isAbsolute } from 'node:path';
 import type { EntitySetDefinition } from '../tools/registry.js';
 import { parseApiConfig, type UpdateMethod } from './api-config-schema.js';
-import { applyReadOnly } from './read-only.js';
+import { applyReadOnly, parseReadOnly, READ_ONLY_ACCEPTED_VALUES } from './read-only.js';
 
 export { UPDATE_METHODS, type UpdateMethod } from './api-config-schema.js';
 
@@ -46,8 +46,19 @@ const configSchema = z.object({
 
   apiConfigFile: z.string().default('api-config.json'),
 
-  // Only the exact string "true" turns read-only mode on.
-  readOnly: z.string().optional().transform((v) => v === "true"),
+  // "true"/"1" turn read-only mode on; "false"/"0", unset or empty leave it off.
+  // Any other value is refused so a typo cannot silently grant write access.
+  readOnly: z.string().optional().transform((v, ctx) => {
+    const parsed = parseReadOnly(v);
+    if (parsed === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `MCP_READ_ONLY has the unrecognised value "${v}". Accepted values: ${READ_ONLY_ACCEPTED_VALUES}.`,
+      });
+      return z.NEVER;
+    }
+    return parsed;
+  }),
 });
 
 /** Inferred type from the raw Zod schema (enabledApiCategories is still a string). */

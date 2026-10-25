@@ -32,6 +32,7 @@ import {
 } from './registry.js';
 import { logger } from '../utils/logger.js';
 import { buildEntityPath } from './path-guard.js';
+import { strictInput } from './strict-input.js';
 
 /** Map-key separator; cannot occur in an api or entity-set name. */
 const KEY_SEP = '\u0000';
@@ -309,7 +310,7 @@ export function registerDiscoveryTools(server: McpServer, options: DiscoveryOpti
         `Use detail="brief" (default) to scan candidates, then detail="full" on a narrowed query to get ` +
         `keys, filterable properties and path examples needed to build the call. ` +
         `An empty or unmatched query returns everything, so you can always browse.${pinnedNote}`,
-      inputSchema: {
+      inputSchema: strictInput({
         query: z.string().optional().describe(
           'Natural-language or keyword search over entity set names, descriptions and categories. ' +
           'Examples: "subaccounts", "service entitlements", "role collections". Omit to list everything.',
@@ -323,7 +324,7 @@ export function registerDiscoveryTools(server: McpServer, options: DiscoveryOpti
           'full = adds keys, navigation/filterable/selectable properties and path examples.',
         ),
         limit: z.number().int().min(1).max(100).optional().describe('Maximum matches to return.'),
-      },
+      }),
       annotations: { readOnlyHint: true },
     },
     async (args): Promise<CallToolResult> => {
@@ -368,7 +369,7 @@ export function registerDiscoveryTools(server: McpServer, options: DiscoveryOpti
         'Execute an OData operation found via search_operations. ' +
         'Provide api, entitySet and operation; build `path` from the entity set\'s pathExamples ' +
         '(keys, $filter, $select, $top…) and `body` for create/update.',
-      inputSchema: {
+      inputSchema: strictInput({
         api: z.enum(apiNames as [string, ...string[]]).describe('API name from search_operations.'),
         entitySet: z.string().describe('Entity set name exactly as returned by search_operations.'),
         operation: z.enum(OPERATIONS).describe('Operation to perform.'),
@@ -382,7 +383,7 @@ export function registerDiscoveryTools(server: McpServer, options: DiscoveryOpti
         ),
         body: z.record(z.unknown()).optional().describe('Request body for create/update (entity properties as JSON).'),
         headers: z.record(z.string()).optional().describe('Additional HTTP headers.'),
-      },
+      }),
     },
     async (args, extra): Promise<CallToolResult> => {
       const entry = byKey.get(`${args.api}${KEY_SEP}${args.entitySet}`);

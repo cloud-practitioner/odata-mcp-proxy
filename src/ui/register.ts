@@ -22,6 +22,7 @@ import type { UiViewDefinition } from '../config/index.js';
 import { fetchUiData } from './data.js';
 import { assembleTemplate, injectData } from './templates.js';
 import { authorize, validateScopeOptions, type ScopeOptions } from '../tools/registry.js';
+import { strictInput } from '../tools/strict-input.js';
 import { logger } from '../utils/logger.js';
 
 const DEFAULT_FRAME_SIZE: [string, string] = ['100%', '760px'];
@@ -208,7 +209,7 @@ export function registerUiTools(server: McpServer, options: UiRegistrationOption
       view.tool,
       {
         description: view.description,
-        inputSchema: buildInputSchema(view),
+        inputSchema: strictInput(buildInputSchema(view)),
         annotations: { readOnlyHint: true },
         _meta: { [RESOURCE_URI_META_KEY]: view.uri },
       },

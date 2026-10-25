@@ -7,7 +7,9 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { applyReadOnly } from '../src/config/read-only.js';
+import { spawn } from 'node:child_process';
+import { applyReadOnly, parseReadOnly } from '../src/config/read-only.js';
+import { loadConfig } from '../src/config/index.js';
 import { ODataClient } from '../src/client/odata-client.js';
 import type { EntitySetDefinition } from '../src/tools/registry.js';
 
@@ -65,14 +67,15 @@ test('a read-only client still sends GET', async () => {
 
 const rootDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 
-async function listToolNames(readOnly: boolean): Promise<string[]> {
+async function listToolNames(readOnly: boolean | string): Promise<string[]> {
   const env: Record<string, string> = {
     ...(process.env as Record<string, string>),
     MCP_TRANSPORT: 'stdio',
     API_CONFIG_FILE: join(rootDir, 'test', 'fixtures', 'read-only-config.json'),
     LOG_LEVEL: 'error',
   };
-  if (readOnly) env.MCP_READ_ONLY = 'true';
+  if (typeof readOnly === 'string') env.MCP_READ_ONLY = readOnly;
+  else if (readOnly) env.MCP_READ_ONLY = 'true';
   else delete env.MCP_READ_ONLY;
   const client = new Client({ name: 'read-only-test', version: '0.0.0' });
   await client.connect(new StdioClientTransport({ command: process.execPath, args: [join(rootDir, 'dist', 'index.js')], cwd: rootDir, env }));
@@ -102,3 +105,98 @@ test('a client without read-only mode still sends writes', async () => {
   await assert.rejects(client.post('Packages', { Id: 'X' }), /destination reached/);
   assert.equal(reached, 1);
 });
+
+// ─── MCP_READ_ONLY value parsing ─────────────────────────────────────────────
+// "true"/"false" (any case) and "1"/"0" are accepted; unset or empty is off;
+// any other value refuses startup so a typo cannot silently grant write access.
+
+const WRITE_TOOLS = ['Packages_create', 'Packages_update', 'Packages_delete'];
+
+test('parseReadOnly accepts true and 1 in any case, with surrounding whitespace', () => {
+  for (const value of ['true', 'TRUE', 'True', 'tRuE', '1', ' true ', ' 1\n']) {
+    assert.equal(parseReadOnly(value), true, JSON.stringify(value));
+  }
+});
+
+test('parseReadOnly treats false, 0, unset and empty as off', () => {
+  for (const value of ['false', 'FALSE', 'False', '0', '', '   ', undefined]) {
+    assert.equal(parseReadOnly(value), false, JSON.stringify(value));
+  }
+});
+
+test('parseReadOnly rejects every other value', () => {
+  for (const value of ['yes', 'no', 'on', 'off', 'y', 't', 'tru', 'truee', '2', '-1', '01', '10', 'true,false', 'enabled']) {
+    assert.equal(parseReadOnly(value), undefined, JSON.stringify(value));
+  }
+});
+
+test('loadConfig maps MCP_READ_ONLY to readOnly and refuses an unknown value naming the variable', () => {
+  const previous = process.env.MCP_READ_ONLY;
+  try {
+    for (const [value, expected] of [['TRUE', true], ['1', true], ['false', false], ['0', false], ['', false]] as const) {
+      process.env.MCP_READ_ONLY = value;
+      assert.equal(loadConfig().readOnly, expected, JSON.stringify(value));
+    }
+    delete process.env.MCP_READ_ONLY;
+    assert.equal(loadConfig().readOnly, false);
+
+    for (const value of ['yes', 'on', '2']) {
+      process.env.MCP_READ_ONLY = value;
+      assert.throws(
+        () => loadConfig(),
+        (error: Error) =>
+          error.message.includes('MCP_READ_ONLY') &&
+          error.message.includes(`"${value}"`) &&
+          error.message.includes('true, false, 1, 0'),
+        value,
+      );
+    }
+  } finally {
+    if (previous === undefined) delete process.env.MCP_READ_ONLY;
+    else process.env.MCP_READ_ONLY = previous;
+  }
+});
+
+for (const value of ['TRUE', 'True', '1']) {
+  test(`the stdio server registers no write tool with MCP_READ_ONLY=${value}`, async () => {
+    const names = await listToolNames(value);
+    assert.ok(names.includes('Packages_list'));
+    assert.ok(names.includes('Packages_get'));
+    for (const name of WRITE_TOOLS) assert.ok(!names.includes(name), `${name} registered with MCP_READ_ONLY=${value}`);
+  });
+}
+
+for (const value of ['false', 'FALSE', '0', '']) {
+  test(`the stdio server keeps write tools with MCP_READ_ONLY=${JSON.stringify(value)}`, async () => {
+    const names = await listToolNames(value);
+    for (const name of WRITE_TOOLS) assert.ok(names.includes(name), `${name} missing with MCP_READ_ONLY=${JSON.stringify(value)}`);
+  });
+}
+
+for (const value of ['yes', 'on', 'truee']) {
+  test(`the stdio server refuses to start with MCP_READ_ONLY=${value}`, async () => {
+    const env: Record<string, string> = {
+      ...(process.env as Record<string, string>),
+      MCP_TRANSPORT: 'stdio',
+      API_CONFIG_FILE: join(rootDir, 'test', 'fixtures', 'read-only-config.json'),
+      LOG_LEVEL: 'error',
+      MCP_READ_ONLY: value,
+    };
+    const child = spawn(process.execPath, [join(rootDir, 'dist', 'index.js')], {
+      cwd: rootDir,
+      env,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      timeout: 30_000,
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.setEncoding('utf8').on('data', (chunk) => { stdout += chunk; });
+    child.stderr.setEncoding('utf8').on('data', (chunk) => { stderr += chunk; });
+    const status = await new Promise<number | null>((resolve) => child.on('close', resolve));
+    assert.equal(status, 1, stderr);
+    assert.equal(stdout, '');
+    assert.match(stderr, /MCP_READ_ONLY/);
+    assert.ok(stderr.includes(`"${value}"`), stderr);
+    assert.match(stderr, /Accepted values: true, false, 1, 0/);
+  });
+}
