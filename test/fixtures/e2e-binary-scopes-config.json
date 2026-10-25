@@ -1,0 +1,36 @@
+{
+  "server": {
+    "name": "binary-scopes-e2e",
+    "version": "0.0.1",
+    "description": "Stub config for binary transfers with distinct read and write scopes"
+  },
+  "discovery": {
+    "mode": "hybrid",
+    "alwaysRegister": ["IntegrationDesigntimeArtifacts"]
+  },
+  "apis": [
+    {
+      "name": "cpi",
+      "destination": "E2E_SCOPES_DEST",
+      "pathPrefix": "/api/v1",
+      "entitySets": [
+        {
+          "entitySet": "IntegrationDesigntimeArtifacts",
+          "description": "Design-time integration artifacts",
+          "category": "integration-content",
+          "keys": [
+            { "name": "Id", "type": "string" },
+            { "name": "Version", "type": "string" }
+          ],
+          "operations": {
+            "list": false,
+            "get": { "enabled": true, "requiredScope": "read" },
+            "create": { "enabled": true, "requiredScope": "write" },
+            "update": false,
+            "delete": false
+          }
+        }
+      ]
+    }
+  ]
+}
