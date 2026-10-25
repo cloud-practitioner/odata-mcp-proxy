@@ -250,7 +250,7 @@ my-mcp-server/
 ├── default-env.json      # local BTP credentials (gitignored)
 ├── .env                  # local env overrides (gitignored)
 ├── mta.yaml              # BTP deployment descriptor
-└── xs-security.json      # XSUAA config (if using OAuth)
+└── xs-security.json      # Runtime OAuth client policy + role definitions
 ```
 
 ### Deploying to BTP as a consumer project

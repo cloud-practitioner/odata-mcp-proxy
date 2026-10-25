@@ -6,10 +6,11 @@ or **Deny** before XSUAA sign-in, including when an SSO session already exists. 
 name and return address before approving. An ordinary MCP reconnect or token refresh does not
 start a new authorization flow; a client that restarts authorization will show approval again.
 
-Upgrade **all replicas**, restart any sign-in already in progress, and use Node.js 22 or later.
-Keep the public OAuth URL on one canonical origin; approval cookies and the callback must reach
-that origin. The update does not revoke previously issued access or refresh tokens. If exposure
-is suspected, follow your identity provider's session/token revocation procedures separately.
+Upgrade **all replicas**, restart any sign-in already in progress, and use Node.js per the
+[README prerequisites](../README.md#prerequisites).
+Keep the public OAuth URL on one canonical origin; the callback requires the approving browser's
+cookie on that origin. The update does not revoke previously issued access or refresh tokens.
+If exposure is suspected, follow your identity provider's session/token revocation procedures separately.
 
 XSUAA's `oauth2-configuration.redirect-uris` must contain only this server's exact
 `https://<your-app-route>/oauth/callback` address (and explicitly needed development callbacks).
@@ -24,25 +25,23 @@ descriptors can override the new defaults.
 
 ### Client registration names
 
-The library derives each client ID from the registration metadata and the current second. Two
-identical registrations in the same second got the same client ID and the same client secret. The
-adapter now adds a random suffix to `client_name` (for example `My Client #Xk3...`) on every
-registration. Each client gets its own ID and secret. The approval page shows the suffixed name.
-Remove the suffix when the library adds its own per-registration nonce.
+The library derives each client ID from the registration metadata and the current second, so
+identical same-second registrations can collide. The adapter now adds a random suffix to
+`client_name` (for example `My Client #Xk3...`) on every
+registration. Each registration gets its own ID and, for confidential clients, its own secret.
+The approval page shows the suffixed name.
 
 ### Existing consuming applications
 
-This project also reads `xs-security.json` (or `XS_SECURITY_JSON_PATH`) as its **runtime MCP
-client return-address allowlist**. That compatibility behavior is retained. The MTA override
-above restricts only the managed XSUAA service; it does not replace the runtime allowlist.
+Keep the [runtime MCP client return-address allowlist](DEPLOYMENT.md#redirect-policy-and-deployment-constraints).
+The MTA override above restricts only the managed XSUAA service; it does not replace that allowlist.
 For a consuming app or manual `cf push`, keep that client-policy file and create a **separate**
 service-configuration copy containing only the server callback. Apply that copy using
 `cf update-service <your-xsuaa-instance> -c <service-security.json>`. Do not point
 `XS_SECURITY_JSON_PATH` at the server-only copy: that would reject your MCP clients.
 
-The custom adapter keeps its existing PKCE checks, client-bound code envelope, refresh-token
-ownership checks and supported client authentication methods. It now lets the library validate
-browser approval before wrapping the approved code. No redirect allowlist entry skips consent.
+No redirect allowlist entry skips consent. For PKCE, token binding, and supported client
+authentication methods, see [OAuth discovery and client registration](DEPLOYMENT.md#oauth-discovery-and-client-registration).
 
 ### Before completing a production rollout
 
