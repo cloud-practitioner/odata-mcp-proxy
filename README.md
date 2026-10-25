@@ -1,5 +1,7 @@
 # OData MCP Proxy
 
+> Upgrading an XSUAA deployment? Read the [OAuth upgrade guide](docs/XSUAA-AUTH-UPGRADE.md) before redeploying.
+
 A config-driven [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server that exposes OData and REST APIs as MCP tools. This enables AI assistants such as Claude to query, manage, and monitor SAP backends through natural language.
 
 The server runs on SAP BTP Cloud Foundry and uses BTP Destinations for secure, token-managed connectivity to OData APIs.
@@ -248,7 +250,7 @@ my-mcp-server/
 ├── default-env.json      # local BTP credentials (gitignored)
 ├── .env                  # local env overrides (gitignored)
 ├── mta.yaml              # BTP deployment descriptor
-└── xs-security.json      # XSUAA config (if using OAuth)
+└── xs-security.json      # Runtime OAuth client policy + role definitions
 ```
 
 ### Deploying to BTP as a consumer project
@@ -280,6 +282,10 @@ modules:
         - .git/
         - .env
         - default-env.json
+    provides:
+      - name: oauth-api
+        properties:
+          url: ${default-url}
     requires:
       - name: my-destination
       - name: my-connectivity
@@ -300,10 +306,16 @@ resources:
 
   - name: my-xsuaa
     type: org.cloudfoundry.managed-service
+    requires:
+      - name: oauth-api
     parameters:
       service: xsuaa
       service-plan: application
       path: xs-security.json
+      config:
+        oauth2-configuration:
+          redirect-uris:
+            - ~{oauth-api/url}/oauth/callback
 ```
 
 The key difference from a standalone deployment: `builder: npm` is all you need. MBT runs `npm install --production`, which installs the pre-built `odata-mcp-proxy` package from the registry. No TypeScript, no custom build commands.

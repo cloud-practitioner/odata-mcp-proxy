@@ -12,7 +12,7 @@ import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middlew
 import { InvalidClientMetadataError, InvalidGrantError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
 import type { OAuthServerProvider } from '@modelcontextprotocol/sdk/server/auth/provider.js';
 import type { OAuthTokens } from '@modelcontextprotocol/sdk/shared/auth.js';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { isAbsolute, resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -87,9 +87,12 @@ export function setupXsuaaAuth(app: Express, credentials: XsuaaCredentials, appU
   const patterns = resolveRedirectUris(process.env, logger);
   const { provider: upstream, clientStore } = createXsuaaOAuthProvider(credentials, appUrl, {
     redirectUriPatterns: patterns,
+    dcrRedirectUriPatterns: patterns,
     defaultRedirectUris: patterns.filter((uri) => !uri.includes('*')),
     logger,
   });
+  // Must use the same signing secret/KDF as createXsuaaOAuthProvider above.
+  // If adding dcrSigningSecret or stateKdfLabel there, update this codec too.
   const stateCodec = new FlowStateCodec(credentials.clientsecret);
   const codeCodec = new OAuthStateCodec(credentials.clientsecret, { kdfLabel: 'odata-mcp-code/v1' });
   const refreshCodec = new OAuthStateCodec(credentials.clientsecret, {
@@ -163,14 +166,44 @@ export function setupXsuaaAuth(app: Express, credentials: XsuaaCredentials, appU
         if (method !== 'none' && method !== 'client_secret_post') {
           throw new InvalidClientMetadataError('token_endpoint_auth_method must be none or client_secret_post');
         }
-        return clientStore.registerClient({ ...client, token_endpoint_auth_method: method });
+        // xsuaa-auth derives client_id from the metadata plus a whole-second timestamp, and the secret from client_id.
+        // A per-registration nonce in client_name keeps identical same-second registrations apart (RFC 7591 3.2.1
+        // lets the server replace requested metadata). Remove this when the library adds its own nonce.
+        const nonce = randomBytes(9).toString('base64url');
+        return clientStore.registerClient({
+          ...client,
+          token_endpoint_auth_method: method,
+          client_name: `${client.client_name || 'mcp-client'} #${nonce}`,
+        });
       },
     },
     skipLocalPkceValidation: true,
-    authorize: (client, params, res) => upstream.authorize(client, {
-      ...params,
-      state: JSON.stringify({ challenge: params.codeChallenge, state: params.state }),
-    }, res),
+    authorize: async (client, params, res) => {
+      const redirect = res.redirect.bind(res);
+      // Deny returns directly from /authorize, without passing through FlowStateCodec.
+      // Restore the client's opaque state on that response as well as on /oauth/callback.
+      res.redirect = ((statusOrUrl: number | string, location?: string) => {
+        const status = typeof statusOrUrl === 'number' ? statusOrUrl : 302;
+        const target = new URL(typeof statusOrUrl === 'string' ? statusOrUrl : location!);
+        if (status === 303 && target.searchParams.get('error') === 'access_denied') {
+          const flow = flowSchema.parse(JSON.parse(target.searchParams.get('state') ?? '{}'));
+          if (flow.state === undefined) target.searchParams.delete('state');
+          else target.searchParams.set('state', flow.state);
+        }
+        return redirect(status, target.toString());
+      }) as typeof res.redirect;
+      try {
+        await upstream.authorize(client, {
+          ...params,
+          // The approval form already carries the signed transformed state. Do not wrap it again.
+          state: res.req.method === 'POST' && res.req.body?.consent_proof !== undefined
+            ? params.state
+            : JSON.stringify({ challenge: params.codeChallenge, state: params.state }),
+        }, res);
+      } finally {
+        res.redirect = redirect;
+      }
+    },
     challengeForAuthorizationCode: async (client, code) => authorizationGrant(client.client_id, code).challenge,
     exchangeAuthorizationCode: async (client, code, verifier, redirectUri) => {
       const grant = authorizationGrant(client.client_id, code, redirectUri);
@@ -178,10 +211,12 @@ export function setupXsuaaAuth(app: Express, credentials: XsuaaCredentials, appU
           createHash('sha256').update(verifier).digest('base64url') !== grant.challenge) {
         throw new InvalidGrantError('code_verifier does not match the challenge');
       }
+      const upstreamCode = stateCodec.authorizationCodes.decode(grant.code, client.client_id, redirectUri);
+      if (!upstreamCode) throw new InvalidGrantError('Invalid browser-approved authorization code');
       return bindRefreshToken(
         await exchangeGrant({
           grant_type: 'authorization_code',
-          code: grant.code,
+          code: upstreamCode,
           code_verifier: verifier,
           redirect_uri: `${appUrl}/oauth/callback`,
         }),
@@ -222,24 +257,26 @@ export function setupXsuaaAuth(app: Express, credentials: XsuaaCredentials, appU
   const callback = createOAuthCallbackHandler(stateCodec, clientStore, { logger });
   app.get('/oauth/callback', async (req, res, next) => {
     const decoded = stateCodec.decodeFlow(typeof req.query.state === 'string' ? req.query.state : '');
-    const code = typeof req.query.code === 'string' ? req.query.code : '';
-    if (decoded && (!decoded.clientId || !matchesRedirectPattern(decoded.clientRedirectUri, patterns) ||
-        await clientStore.checkRedirectUri(decoded.clientId, decoded.clientRedirectUri) !== 'ok')) {
-      res.status(400).send('Invalid OAuth redirect target');
-      return;
-    }
-    if (!decoded?.clientId || !code || req.query.error) {
+    const redirect = res.redirect.bind(res);
+    // Only the shared callback may validate the browser and issue the inner code.
+    // Retain this application's additional local PKCE envelope after that succeeds.
+    res.redirect = ((status: number, location: string) => {
+      const target = new URL(location);
+      const approvedCode = target.searchParams.get('code');
+      if (approvedCode && decoded?.clientId) {
+        target.searchParams.set('code', codeCodec.encode({
+          clientId: decoded.clientId,
+          clientRedirectUri: decoded.clientRedirectUri,
+          clientState: JSON.stringify({ code: approvedCode, challenge: decoded.flow.challenge }),
+        }));
+      }
+      return redirect(status, target.toString());
+    }) as typeof res.redirect;
+    try {
       await callback(req, res, next);
-      return;
+    } finally {
+      res.redirect = redirect;
     }
-    const target = new URL(decoded.clientRedirectUri);
-    target.searchParams.set('code', codeCodec.encode({
-      clientId: decoded.clientId,
-      clientRedirectUri: decoded.clientRedirectUri,
-      clientState: JSON.stringify({ code, challenge: decoded.flow.challenge }),
-    }));
-    if (decoded.flow.state !== undefined) target.searchParams.set('state', decoded.flow.state);
-    res.redirect(302, target.toString());
   });
   app.use(mcpAuthRouter({
     provider,
